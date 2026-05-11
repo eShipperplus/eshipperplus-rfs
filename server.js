@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const multer = require('multer');
+const nodemailer = require('nodemailer');
 const { PDFDocument } = require('pdf-lib');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
@@ -122,19 +123,119 @@ function shortOrderForList(o) {
 // Append-only event log. Captures every state change so disputes can be traced.
 // Failures here NEVER throw — auditing must not break the action it's auditing.
 async function logEvent({ type, actor, subjectType, subjectId, summary, meta }) {
+  const evt = {
+    at: Timestamp.now(),
+    type,
+    actor: actor ? { uid: actor.uid || null, email: actor.email || null, displayName: actor.displayName || null } : null,
+    subjectType: subjectType || null,
+    subjectId: subjectId || null,
+    summary: summary || null,
+    meta: meta || {},
+  };
   try {
-    await db.collection('rfs_events').add({
-      at: Timestamp.now(),
-      type,
-      actor: actor ? { uid: actor.uid || null, email: actor.email || null, displayName: actor.displayName || null } : null,
-      subjectType: subjectType || null,
-      subjectId: subjectId || null,
-      summary: summary || null,
-      meta: meta || {},
-    });
+    await db.collection('rfs_events').add(evt);
   } catch (err) {
     console.error('[audit] failed to log', type, err.message);
   }
+  // Fire notifications async — never blocks the action that triggered the event.
+  dispatchNotifications(evt).catch(err => console.error('[notify] dispatch error:', err.message));
+}
+
+// ─── Email + notification rules ──────────────────────────────────────────────
+// Uses Gmail SMTP via nodemailer (same pattern as warehouse-billing). Set
+// SMTP_USER + SMTP_PASS env vars (Gmail address + app password).
+const _mailer = (process.env.SMTP_USER && process.env.SMTP_PASS)
+  ? nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } })
+  : null;
+
+async function sendEmail(to, subject, html) {
+  if (!_mailer) {
+    console.warn('[email] SMTP not configured — skipping email to', to, 'subject:', subject);
+    return { skipped: true };
+  }
+  try {
+    await _mailer.sendMail({ from: `eShipper+ RFS <${process.env.SMTP_USER}>`, to, subject, html });
+    return { sent: true };
+  } catch (err) {
+    console.error('[email] send failed:', err.message);
+    return { error: err.message };
+  }
+}
+
+// Notification rules — stored in Firestore `rfs_notification_rules`.
+// Schema: { event, clientName | null (null = any), recipients: string[],
+//           condition: 'always' | 'has_dims' | 'has_weight', enabled, createdAt, createdBy }
+// `event` matches a logEvent type (order.staged, bol.uploaded, po.arrived, po.blind_received, etc.)
+async function dispatchNotifications(event) {
+  try {
+    const rulesSnap = await db.collection('rfs_notification_rules')
+      .where('enabled', '==', true)
+      .where('event', '==', event.type)
+      .get();
+    if (rulesSnap.empty) return;
+
+    for (const ruleDoc of rulesSnap.docs) {
+      const rule = ruleDoc.data();
+      // Client filter (null = all clients)
+      if (rule.clientName && rule.clientName !== '*' && event.meta?.clientName !== rule.clientName) continue;
+      // Condition gating
+      if (rule.condition === 'has_dims') {
+        const pallets = event.meta?.pallets || [];
+        const anyDims = pallets.some(p => p.length || p.width || p.height);
+        if (!anyDims) continue;
+      } else if (rule.condition === 'has_weight') {
+        const pallets = event.meta?.pallets || [];
+        const anyWt = pallets.some(p => p.weight);
+        if (!anyWt) continue;
+      }
+
+      const recipients = (rule.recipients || []).filter(Boolean);
+      if (!recipients.length) continue;
+      const subject = renderEmailSubject(event);
+      const html = renderEmailBody(event);
+      await sendEmail(recipients.join(','), subject, html);
+    }
+  } catch (err) {
+    console.error('[notifications] dispatch failed:', err.message);
+  }
+}
+
+function renderEmailSubject(event) {
+  const m = event.meta || {};
+  switch (event.type) {
+    case 'order.staged': return `RFS putaway · ${m.orderCode || ''}${m.clientName ? ' · ' + m.clientName : ''}`;
+    case 'bol.uploaded': return `RFS shipped · ${m.orderCode || ''} · ${m.clientName || ''}`;
+    case 'po.arrived':  return `PO received · ${m.poCode || ''} · ${m.clientName || ''}`;
+    case 'po.blind_received': return `Blind receipt · ${m.clientName || 'client unknown'} · ${m.count} ${m.receiptType}`;
+    default: return `RFS event · ${event.type}`;
+  }
+}
+
+function renderEmailBody(event) {
+  const m = event.meta || {};
+  const palletList = (m.pallets || []).map(p => {
+    const dims = (p.length || p.width || p.height) ? `${p.length || '—'}×${p.width || '—'}×${p.height || '—'} ${p.dimensionUnit || 'in'}` : '';
+    const wt = p.weight ? `${p.weight} ${p.weightUnit || 'lb'}` : '';
+    return `<tr><td style="padding:4px 12px 4px 0">P${p.palletNo}</td><td style="padding:4px 12px 4px 0">${p.locationCode || '—'}</td><td style="padding:4px 12px 4px 0">${dims}</td><td style="padding:4px 0">${wt}</td></tr>`;
+  }).join('');
+  return `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#1a1a1a">
+      <p><strong>${event.summary || event.type}</strong></p>
+      <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
+        ${event.actor?.email ? `<tr><td style="padding:2px 12px 2px 0;color:#666">By</td><td>${event.actor.email}</td></tr>` : ''}
+        ${m.orderCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Order</td><td>${m.orderCode}</td></tr>` : ''}
+        ${m.poCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">PO</td><td>${m.poCode}</td></tr>` : ''}
+        ${m.clientName ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Client</td><td>${m.clientName}</td></tr>` : ''}
+        ${m.receiptType ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Received</td><td>${m.count} ${m.receiptType}</td></tr>` : ''}
+      </table>
+      ${palletList ? `<p style="margin-top:14px"><strong>Pallets</strong></p>
+        <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
+          <tr style="color:#666"><td style="padding:2px 12px 2px 0">#</td><td style="padding:2px 12px 2px 0">Location</td><td style="padding:2px 12px 2px 0">Dims</td><td style="padding:2px 0">Weight</td></tr>
+          ${palletList}
+        </table>` : ''}
+      <p style="margin-top:14px;color:#777;font-size:12px">eShipper+ RFS · automated notification</p>
+    </div>
+  `;
 }
 
 function num(v) {
@@ -892,6 +993,8 @@ app.post('/api/rfs/pos/:identifier/arrive', requireAuth, upload.single('pod'), a
         plannedReceivingDate: po.plannedReceivingDate || null,
         referenceNumber: po.referenceNumber || null,
         actualArrivalDate: new Date().toISOString(),
+        // CSM-requested mapping: receipt count goes into Logiwa's customFieldTextBox2
+        customFieldTextBox2: String(countNum),
         purchaseOrderLineList,
       };
       logiwaUpdateResult = await logiwa.updatePurchaseOrder(updateBody);
@@ -996,6 +1099,188 @@ app.post('/api/rfs/blind-receipt', requireAuth, upload.single('pod'), async (req
   }
 });
 
+// Helper used by both /arrive and /link-logiwa to push POD + arrival date + count to a Logiwa PO.
+// Returns { logiwaDocResult, logiwaUpdateResult, logiwaError } — caller persists the result.
+async function pushReceiptToLogiwa({ po, podBuffer, podMimeType, podFileName, receiptCount }) {
+  let logiwaDocResult = null;
+  let logiwaUpdateResult = null;
+  let logiwaError = null;
+
+  // 1. POD document
+  try {
+    logiwaDocResult = await logiwa.uploadPurchaseOrderDocument({
+      purchaseOrderIdentifier: po.logiwaIdentifier,
+      purchaseOrderCode: po.logiwaCode,
+      fileName: podFileName,
+      buffer: podBuffer,
+      mimeType: podMimeType,
+      documentType: logiwa.DOCUMENT_TYPE_EXTERNAL,
+    });
+  } catch (e) {
+    logiwaError = `POD upload to Logiwa failed: ${e.message}`;
+    console.error(logiwaError);
+  }
+
+  // 2. Update PO (arrival date + count → customFieldTextBox2)
+  try {
+    let currencyId = null;
+    if (po.currencyCode) {
+      try { currencyId = (await logiwa.getCurrencyIdMap())[po.currencyCode] || null; } catch {}
+    }
+    let purchaseOrderLineList = [];
+    try {
+      const detail = await logiwa.getPurchaseOrderDetail(po.logiwaIdentifier);
+      purchaseOrderLineList = (detail.purchaseOrderLineList || []).map(l => ({
+        sku: l.sku || null,
+        packType: l.linePackTypeName || null,
+        licensePlateType: l.licensePlateTypeCode || null,
+        licensePlateNumber: l.licensePlateNumber || null,
+        warehouseLocation: l.warehouseLocationCode || null,
+        packQuantity: l.linePackQuantity ?? null,
+        unitPrice: l.lineUnitPrice ?? null,
+        taxRate: 0,
+        note: l.note || null,
+        lotBatchNumber: l.lotBatchNumber || null,
+        expiryDate: l.expiryDate || null,
+        productionDate: l.productionDate || null,
+      }));
+    } catch (e) { console.error('PO line fetch error:', e.message); }
+
+    logiwaUpdateResult = await logiwa.updatePurchaseOrder({
+      identifier: po.logiwaIdentifier,
+      code: po.logiwaCode,
+      vendor: po.vendorDisplayName,
+      purchaseOrderTypeName: po.purchaseOrderTypeName,
+      currencyId,
+      clientIdentifier: po.clientIdentifier,
+      warehouseIdentifier: po.warehouseIdentifier,
+      purchaseOrderDate: po.purchaseOrderDate || null,
+      plannedArrivalDate: po.plannedArrivalDate || null,
+      plannedReceivingDate: po.plannedReceivingDate || null,
+      referenceNumber: po.referenceNumber || null,
+      actualArrivalDate: new Date().toISOString(),
+      customFieldTextBox2: receiptCount != null ? String(receiptCount) : null,
+      purchaseOrderLineList,
+    });
+  } catch (e) {
+    logiwaError = (logiwaError ? logiwaError + ' | ' : '') + `Arrival-date update failed: ${e.message}`;
+    console.error('PO update error:', e.message);
+  }
+
+  return { logiwaDocResult, logiwaUpdateResult, logiwaError };
+}
+
+// Edit a blind (or any) receipt's metadata. Used to fix typos in count/type/notes after arrival.
+app.put('/api/rfs/pos/:id/edit', requireAuth, async (req, res) => {
+  try {
+    const { receiptType, count, clientName, vendorName, note } = req.body;
+    const ref = db.collection('rfs_pos').doc(req.params.id);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Receipt not found' });
+
+    const updates = {};
+    if (receiptType !== undefined) {
+      if (!['boxes', 'pallets', 'container'].includes(receiptType)) return res.status(400).json({ error: 'Bad receiptType' });
+      updates.receiptType = receiptType;
+    }
+    if (count !== undefined) {
+      const n = parseFloat(count);
+      if (!n || n <= 0) return res.status(400).json({ error: 'Bad count' });
+      updates.count = n;
+    }
+    if (clientName !== undefined) updates.clientName = clientName || null;
+    if (vendorName !== undefined) updates.vendorDisplayName = vendorName || null;
+    if (note !== undefined) updates.receiveNote = note || null;
+    updates.editedAt = Timestamp.now();
+    updates.editedBy = req.email;
+
+    await ref.update(updates);
+    await logEvent({ type: 'po.edited', actor: req.user, subjectType: 'po', subjectId: req.params.id, summary: 'Receipt edited', meta: updates });
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// Link a previously-blind receipt to a now-existing Logiwa PO.
+// Looks up the PO by code, pushes the stored POD + arrival date + count to it,
+// then writes the link onto the rfs_pos doc so it no longer shows as blind.
+app.post('/api/rfs/pos/:id/link-logiwa', requireAuth, async (req, res) => {
+  try {
+    const { logiwaCode } = req.body;
+    if (!logiwaCode) return res.status(400).json({ error: 'logiwaCode required' });
+
+    const ref = db.collection('rfs_pos').doc(req.params.id);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Receipt not found' });
+    const receipt = snap.data();
+    if (receipt.logiwaIdentifier) return res.status(400).json({ error: 'Already linked to a Logiwa PO' });
+    if (!receipt.podStoragePath) return res.status(400).json({ error: 'No POD photo on file' });
+
+    const wh = process.env.LOGIWA_ESHIPPER_WH_IDENTIFIER || undefined;
+    const po = await logiwa.findPurchaseOrderByCode(logiwaCode, { warehouseIdentifier: wh });
+    if (!po) return res.status(404).json({ error: `Logiwa PO ${logiwaCode} not found` });
+
+    // Pull POD bytes back from Firebase Storage to push to Logiwa
+    const file = bucket.file(receipt.podStoragePath);
+    const [podBuffer] = await file.download();
+    const ext = (receipt.podStoragePath.split('.').pop() || 'pdf').toLowerCase();
+    const podMimeType = ext === 'pdf' ? 'application/pdf' : (ext === 'png' ? 'image/png' : 'image/jpeg');
+    // Ensure PDF for Logiwa (same rule as the BOL flow)
+    const pdfBuffer = await ensurePdf(podBuffer, podMimeType);
+
+    const enrichedPo = {
+      logiwaIdentifier: po.identifier,
+      logiwaCode: po.code,
+      vendorDisplayName: po.vendorDisplayName,
+      clientIdentifier: po.clientIdentifier,
+      clientName: po.clientDisplayName,
+      purchaseOrderTypeName: po.purchaseOrderTypeName,
+      warehouseIdentifier: po.warehouseIdentifier,
+      currencyCode: po.currencyCode,
+      purchaseOrderDate: po.purchaseOrderDate,
+      plannedArrivalDate: po.plannedArrivalDate,
+      plannedReceivingDate: po.plannedReceivingDate,
+      referenceNumber: po.referenceNumber,
+    };
+
+    const result = await pushReceiptToLogiwa({
+      po: enrichedPo,
+      podBuffer: pdfBuffer,
+      podMimeType: 'application/pdf',
+      podFileName: `POD_${po.code}_${Date.now()}.pdf`,
+      receiptCount: receipt.count,
+    });
+
+    await ref.update({
+      isBlind: false,
+      logiwaIdentifier: po.identifier,
+      logiwaCode: po.code,
+      vendorDisplayName: po.vendorDisplayName || receipt.vendorDisplayName,
+      clientIdentifier: po.clientIdentifier,
+      clientName: po.clientDisplayName || receipt.clientName,
+      purchaseOrderTypeName: po.purchaseOrderTypeName,
+      logiwaDocResult: result.logiwaDocResult,
+      logiwaUpdateResult: result.logiwaUpdateResult,
+      logiwaError: result.logiwaError || FieldValue.delete(),
+      linkedAt: Timestamp.now(),
+      linkedBy: req.email,
+    });
+
+    await logEvent({
+      type: 'po.linked',
+      actor: req.user,
+      subjectType: 'po',
+      subjectId: req.params.id,
+      summary: `Blind receipt linked to Logiwa PO ${po.code}${result.logiwaError ? ' (with Logiwa sync issue)' : ''}`,
+      meta: { logiwaCode: po.code, logiwaError: result.logiwaError || null },
+    });
+
+    res.json({ ok: true, logiwaError: result.logiwaError, logiwaCode: po.code });
+  } catch (err) {
+    console.error('po link error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Distinct client names seen in our data (for the blind-receipt client autocomplete)
 app.get('/api/rfs/clients', requireAuth, async (req, res) => {
   try {
@@ -1034,11 +1319,89 @@ app.get('/api/rfs/admin/pos', requireAuth, requireRole(...REPORT_ROLES), async (
     const days = Math.min(parseInt(req.query.days || '30', 10), 365);
     const since = Timestamp.fromMillis(Date.now() - days * 24 * 60 * 60 * 1000);
     const snap = await db.collection('rfs_pos').where('arrivedAt', '>=', since).orderBy('arrivedAt', 'desc').limit(500).get();
-    res.json({ pos: snap.docs.map(d => d.data()) });
+    res.json({ pos: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
   } catch (err) {
     console.error('admin pos error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Notification rules (admin) ──────────────────────────────────────────────
+const NOTIFY_EVENTS = ['order.staged', 'pallet.loaded', 'bol.uploaded', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
+const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight'];
+
+app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const snap = await db.collection('rfs_notification_rules').orderBy('createdAt', 'desc').limit(500).get();
+    res.json({ rules: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { event, clientName, recipients, condition, enabled } = req.body;
+    if (!NOTIFY_EVENTS.includes(event)) return res.status(400).json({ error: `event must be one of: ${NOTIFY_EVENTS.join(', ')}` });
+    const cond = condition || 'always';
+    if (!NOTIFY_CONDITIONS.includes(cond)) return res.status(400).json({ error: `condition must be one of: ${NOTIFY_CONDITIONS.join(', ')}` });
+    const recip = Array.isArray(recipients) ? recipients.map(s => String(s).trim()).filter(Boolean) : [];
+    if (!recip.length) return res.status(400).json({ error: 'At least one recipient email required' });
+    const ref = await db.collection('rfs_notification_rules').add({
+      event,
+      clientName: clientName || null,
+      recipients: recip,
+      condition: cond,
+      enabled: enabled !== false,
+      createdAt: Timestamp.now(),
+      createdBy: req.email,
+    });
+    await logEvent({ type: 'notification_rule.created', actor: req.user, subjectType: 'rule', subjectId: ref.id, summary: `${event}${clientName ? ' · ' + clientName : ''} → ${recip.length} recipient(s)` });
+    res.json({ ok: true, id: ref.id });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.put('/api/rfs/admin/notification-rules/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const updates = {};
+    if (req.body.event !== undefined) {
+      if (!NOTIFY_EVENTS.includes(req.body.event)) return res.status(400).json({ error: 'Bad event' });
+      updates.event = req.body.event;
+    }
+    if (req.body.clientName !== undefined) updates.clientName = req.body.clientName || null;
+    if (req.body.recipients !== undefined) {
+      const recip = Array.isArray(req.body.recipients) ? req.body.recipients.map(s => String(s).trim()).filter(Boolean) : [];
+      if (!recip.length) return res.status(400).json({ error: 'At least one recipient required' });
+      updates.recipients = recip;
+    }
+    if (req.body.condition !== undefined) {
+      if (!NOTIFY_CONDITIONS.includes(req.body.condition)) return res.status(400).json({ error: 'Bad condition' });
+      updates.condition = req.body.condition;
+    }
+    if (req.body.enabled !== undefined) updates.enabled = !!req.body.enabled;
+    await db.collection('rfs_notification_rules').doc(req.params.id).update(updates);
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.delete('/api/rfs/admin/notification-rules/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    await db.collection('rfs_notification_rules').doc(req.params.id).delete();
+    await logEvent({ type: 'notification_rule.deleted', actor: req.user, subjectType: 'rule', subjectId: req.params.id });
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// Test-fire a rule to confirm SMTP works without waiting for a real event
+app.post('/api/rfs/admin/notification-rules/:id/test', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const snap = await db.collection('rfs_notification_rules').doc(req.params.id).get();
+    if (!snap.exists) return res.status(404).json({ error: 'Rule not found' });
+    const rule = snap.data();
+    const result = await sendEmail(rule.recipients.join(','), `[TEST] RFS notification — ${rule.event}`, `
+      <p>This is a test email from the eShipper+ RFS notification rule for <strong>${rule.event}</strong>${rule.clientName ? ' · ' + rule.clientName : ''}.</p>
+      <p>If you received this, your rule is wired up correctly.</p>
+    `);
+    res.json({ ok: true, result });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 // ─── User invites (admin) ────────────────────────────────────────────────────

@@ -765,11 +765,12 @@ function stopScanner() {
 
 // ─── reports (with sub-tabs) ─────────────────────────────────────────────────
 const REPORT_SUBTABS = [
-  { id: 'orders',    label: 'Orders',    roles: ['admin','supervisor','csm'] },
-  { id: 'pos',       label: 'POs',       roles: ['admin','supervisor','csm'] },
-  { id: 'activity',  label: 'Activity',  roles: ['admin','supervisor','csm'] },
-  { id: 'users',     label: 'Users',     roles: ['admin'] },
-  { id: 'locations', label: 'Locations', roles: ['admin'] },
+  { id: 'orders',        label: 'Orders',        roles: ['admin','supervisor','csm'] },
+  { id: 'pos',           label: 'POs',           roles: ['admin','supervisor','csm'] },
+  { id: 'activity',      label: 'Activity',      roles: ['admin','supervisor','csm'] },
+  { id: 'users',         label: 'Users',         roles: ['admin'] },
+  { id: 'notifications', label: 'Notifications', roles: ['admin'] },
+  { id: 'locations',     label: 'Locations',     roles: ['admin'] },
 ];
 
 async function renderAdmin() {
@@ -882,6 +883,9 @@ async function renderReportsContent() {
 
   } else if (tab === 'users') {
     renderUsersSection(host);
+
+  } else if (tab === 'notifications') {
+    renderNotificationsSection(host);
 
   } else if (tab === 'locations') {
     host.innerHTML = `
@@ -1041,6 +1045,144 @@ async function handleUserAction(action, uid, email) {
       toast(willDisable ? 'User disabled' : 'User enabled');
     }
     loadUsersList();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ─── Notifications sub-tab ───────────────────────────────────────────────────
+const NOTIFY_EVENT_OPTIONS = [
+  { v: 'order.staged',       label: 'Order putaway done' },
+  { v: 'pallet.loaded',      label: 'Pallet loaded' },
+  { v: 'bol.uploaded',       label: 'BOL uploaded / order shipped' },
+  { v: 'po.arrived',         label: 'PO received' },
+  { v: 'po.blind_received',  label: 'Blind receipt (no PO)' },
+  { v: 'po.linked',          label: 'Blind receipt linked to PO' },
+  { v: 'sync.run',           label: 'Logiwa sync ran' },
+];
+const NOTIFY_CONDITION_OPTIONS = [
+  { v: 'always',     label: 'Every time' },
+  { v: 'has_dims',   label: 'Only if dims captured' },
+  { v: 'has_weight', label: 'Only if weight captured' },
+];
+
+let _notifyRules = [];
+
+async function renderNotificationsSection(host) {
+  host.innerHTML = `
+    <div class="card">
+      <h3>Notification rules</h3>
+      <div class="meta" style="margin-bottom:8px">When an event fires, every matching rule sends an email. Add a rule per client + event combo. Requires SMTP_USER + SMTP_PASS env vars to be configured on the server.</div>
+
+      <div class="filter-grid" style="margin-bottom:8px">
+        <select id="nr-event">
+          ${NOTIFY_EVENT_OPTIONS.map(o => `<option value="${o.v}">${escape(o.label)}</option>`).join('')}
+        </select>
+        <input type="text" id="nr-client" list="nr-client-list" placeholder="Client (blank = all clients)" />
+        <datalist id="nr-client-list"></datalist>
+        <select id="nr-condition">
+          ${NOTIFY_CONDITION_OPTIONS.map(o => `<option value="${o.v}">${escape(o.label)}</option>`).join('')}
+        </select>
+        <input type="text" id="nr-recipients" placeholder="Recipients — comma-separated emails" />
+        <button class="btn" id="nr-add">Add rule</button>
+      </div>
+
+      <div id="nr-list"><div class="loader">Loading…</div></div>
+    </div>
+  `;
+
+  // Populate client autocomplete from order + PO data
+  api('GET', '/api/rfs/clients').then(({ clients }) => {
+    const dl = $('#nr-client-list');
+    if (dl && Array.isArray(clients)) dl.innerHTML = clients.map(c => `<option value="${escape(c)}"></option>`).join('');
+  }).catch(() => {});
+
+  $('#nr-add').onclick = saveNotificationRule;
+  await loadNotificationRules();
+}
+
+async function saveNotificationRule() {
+  const event = $('#nr-event').value;
+  const clientName = $('#nr-client').value.trim() || null;
+  const condition = $('#nr-condition').value;
+  const recipients = $('#nr-recipients').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!recipients.length) { toast('Enter at least one recipient email', 'error'); return; }
+  try {
+    $('#nr-add').disabled = true;
+    await api('POST', '/api/rfs/admin/notification-rules', { event, clientName, condition, recipients, enabled: true });
+    toast('Rule added');
+    $('#nr-client').value = '';
+    $('#nr-recipients').value = '';
+    await loadNotificationRules();
+  } catch (e) { toast(e.message, 'error'); }
+  finally { $('#nr-add').disabled = false; }
+}
+
+async function loadNotificationRules() {
+  const host = $('#nr-list');
+  if (!host) return;
+  try {
+    const { rules } = await api('GET', '/api/rfs/admin/notification-rules');
+    _notifyRules = rules;
+    if (!rules.length) { host.innerHTML = '<div class="empty" style="padding:16px">No notification rules yet.</div>'; return; }
+    host.innerHTML = `
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="text-align:left;background:#f7f9fb">
+              <th style="padding:8px">Event</th>
+              <th style="padding:8px">Client</th>
+              <th style="padding:8px">Condition</th>
+              <th style="padding:8px">Recipients</th>
+              <th style="padding:8px">Status</th>
+              <th style="padding:8px">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rules.map(r => {
+              const evtLabel = NOTIFY_EVENT_OPTIONS.find(o => o.v === r.event)?.label || r.event;
+              const condLabel = NOTIFY_CONDITION_OPTIONS.find(o => o.v === r.condition)?.label || r.condition;
+              return `
+                <tr style="border-top:1px solid #e8eaed">
+                  <td style="padding:8px"><strong>${escape(evtLabel)}</strong><br><span class="hint">${escape(r.event)}</span></td>
+                  <td style="padding:8px">${escape(r.clientName || 'All clients')}</td>
+                  <td style="padding:8px">${escape(condLabel)}</td>
+                  <td style="padding:8px">${(r.recipients || []).map(e => `<div>${escape(e)}</div>`).join('')}</td>
+                  <td style="padding:8px">${r.enabled ? '<span class="badge loaded">enabled</span>' : '<span class="badge" style="background:#eee;color:#888">disabled</span>'}</td>
+                  <td style="padding:8px">
+                    <button class="btn secondary" data-nr-action="toggle" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">${r.enabled ? 'Disable' : 'Enable'}</button>
+                    <button class="btn secondary" data-nr-action="test" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">Test</button>
+                    <button class="btn danger" data-nr-action="delete" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">Delete</button>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+    host.querySelectorAll('button[data-nr-action]').forEach(b => {
+      b.onclick = () => handleNotifyRuleAction(b.dataset.nrAction, b.dataset.id);
+    });
+  } catch (e) { host.innerHTML = `<div class="empty">Failed: ${escape(e.message)}</div>`; }
+}
+
+async function handleNotifyRuleAction(action, id) {
+  const rule = _notifyRules.find(r => r.id === id);
+  if (!rule) return;
+  try {
+    if (action === 'toggle') {
+      await api('PUT', `/api/rfs/admin/notification-rules/${id}`, { enabled: !rule.enabled });
+      toast(rule.enabled ? 'Disabled' : 'Enabled');
+    } else if (action === 'test') {
+      const r = await api('POST', `/api/rfs/admin/notification-rules/${id}/test`);
+      if (r.result?.error) toast('SMTP error: ' + r.result.error, 'error');
+      else if (r.result?.skipped) toast('SMTP not configured on server', 'error');
+      else toast('Test email sent');
+    } else if (action === 'delete') {
+      if (!confirm('Delete this rule?')) return;
+      await api('DELETE', `/api/rfs/admin/notification-rules/${id}`);
+      toast('Rule deleted');
+    }
+    await loadNotificationRules();
   } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -1287,10 +1429,13 @@ function applyPOFilters(rows) {
   });
 }
 
+let _filteredPOs = [];
+
 function renderPOReceiptsTable() {
   const host = $('#po-receipts');
   if (!host) return;
   const pos = applyPOFilters(_adminPOs);
+  _filteredPOs = pos;
   if (!pos.length) {
     host.innerHTML = _adminPOs.length
       ? '<div class="empty" style="padding:16px">No POs match the current filter.</div>'
@@ -1313,15 +1458,15 @@ function renderPOReceiptsTable() {
             </tr>
           </thead>
           <tbody>
-            ${pos.map(p => `
-              <tr style="border-top:1px solid #e8eaed">
+            ${pos.map((p, idx) => `
+              <tr style="border-top:1px solid #e8eaed;cursor:pointer" data-po-idx="${idx}">
                 <td style="padding:8px;font-family:ui-monospace,monospace">${p.isBlind ? '<span class="hint">(no PO)</span>' : escape(p.logiwaCode)}</td>
                 <td style="padding:8px">${escape(p.vendorDisplayName || '—')}</td>
                 <td style="padding:8px">${escape(p.clientName || '—')}</td>
                 <td style="padding:8px">${p.count || ''} ${escape(p.receiptType || '')}</td>
                 <td style="padding:8px">${fmtTs(p.arrivedAt)}</td>
                 <td style="padding:8px">${escape(p.arrivedBy || '')}</td>
-                <td style="padding:8px">${p.podPhotoUrl ? `<a href="${escape(p.podPhotoUrl)}" target="_blank">view</a>` : '—'}</td>
+                <td style="padding:8px">${p.podPhotoUrl ? `<a href="${escape(p.podPhotoUrl)}" target="_blank" onclick="event.stopPropagation()">view</a>` : '—'}</td>
                 <td style="padding:8px">${p.isBlind ? '<span class="hint">no PO</span>' : (p.logiwaError ? '<span style="color:#c0392b">err</span>' : '<span style="color:#1f6b1f">ok</span>')}</td>
               </tr>
             `).join('')}
@@ -1329,6 +1474,105 @@ function renderPOReceiptsTable() {
         </table>
       </div>
     `;
+  // Row click → edit modal
+  host.querySelectorAll('tr[data-po-idx]').forEach(tr => {
+    tr.onclick = () => openPOEditModal(_filteredPOs[parseInt(tr.dataset.poIdx, 10)]);
+  });
+}
+
+function openPOEditModal(po) {
+  if (!po) return;
+  // The server uses the Firestore doc id as :id for edit/link.
+  // For Logiwa-linked POs the doc id equals the logiwa identifier; for blind receipts
+  // it's an auto-generated id stored on the doc itself. The admin endpoint returns it as `id`.
+  const docId = po.id || po.logiwaIdentifier;
+  const existing = document.getElementById('po-edit-modal');
+  if (existing) existing.remove();
+  const modal = el(`
+    <div id="po-edit-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:200;padding:16px">
+      <div class="card" style="max-width:520px;width:100%;max-height:90vh;overflow-y:auto;margin:0">
+        <div class="row" style="margin-bottom:8px">
+          <h3 class="grow" style="margin:0">Edit receipt — ${escape(po.isBlind ? '(no PO)' : po.logiwaCode)}</h3>
+          <button id="po-edit-close" style="background:none;border:none;font-size:24px;cursor:pointer;color:#888">×</button>
+        </div>
+        <div class="meta" style="margin-bottom:10px">
+          Arrived ${fmtTs(po.arrivedAt)} by ${escape(po.arrivedBy || '—')}
+          ${po.editedAt ? `<br>Last edited ${fmtTs(po.editedAt)} by ${escape(po.editedBy || '')}` : ''}
+        </div>
+
+        <label>Client</label>
+        <input type="text" id="ed-client" value="${escape(po.clientName || '')}" />
+        <label>Vendor / sender</label>
+        <input type="text" id="ed-vendor" value="${escape(po.vendorDisplayName || '')}" />
+        <label>Type received</label>
+        <select id="ed-type">
+          <option value="boxes"${po.receiptType === 'boxes' ? ' selected' : ''}>Boxes</option>
+          <option value="pallets"${po.receiptType === 'pallets' ? ' selected' : ''}>Pallets</option>
+          <option value="container"${po.receiptType === 'container' ? ' selected' : ''}>Container</option>
+        </select>
+        <label>Count</label>
+        <input type="number" id="ed-count" min="1" step="1" value="${po.count || ''}" />
+        <label>Notes</label>
+        <input type="text" id="ed-note" value="${escape(po.receiveNote || '')}" />
+
+        <button class="btn full" id="po-edit-save" style="margin-top:10px">Save changes</button>
+
+        ${po.isBlind ? `
+          <hr style="margin:18px 0;border:none;border-top:1px solid #e8eaed">
+          <h3 style="font-size:15px;margin-bottom:4px">Link to a Logiwa PO</h3>
+          <div class="meta" style="margin-bottom:8px">If the PO has now been created in Logiwa, paste its code here. The POD will be attached to it and the arrival date set in Logiwa.</div>
+          <label>Logiwa PO code</label>
+          <input type="text" id="ed-link-code" placeholder="e.g. TO4175" />
+          <button class="btn full" id="po-edit-link" style="margin-top:10px;background:#1f6b1f">Link to Logiwa PO</button>
+        ` : `
+          <hr style="margin:18px 0;border:none;border-top:1px solid #e8eaed">
+          <div class="meta">Linked to Logiwa PO <strong>${escape(po.logiwaCode)}</strong>${po.linkedAt ? ` on ${fmtTs(po.linkedAt)}` : ''}</div>
+          ${po.logiwaError ? `<div style="color:#c0392b;margin-top:6px;font-size:13px">Last Logiwa sync error: ${escape(po.logiwaError)}</div>` : ''}
+        `}
+      </div>
+    </div>
+  `);
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  $('#po-edit-close').onclick = close;
+  modal.onclick = (e) => { if (e.target === modal) close(); };
+
+  $('#po-edit-save').onclick = async () => {
+    try {
+      $('#po-edit-save').disabled = true;
+      await api('PUT', `/api/rfs/pos/${docId}/edit`, {
+        clientName: $('#ed-client').value.trim(),
+        vendorName: $('#ed-vendor').value.trim(),
+        receiptType: $('#ed-type').value,
+        count: $('#ed-count').value,
+        note: $('#ed-note').value.trim(),
+      });
+      toast('Receipt updated');
+      close();
+      await loadAdminPOReceipts();
+    } catch (e) { toast(e.message, 'error'); $('#po-edit-save').disabled = false; }
+  };
+
+  if (po.isBlind) {
+    $('#po-edit-link').onclick = async () => {
+      const code = $('#ed-link-code').value.trim();
+      if (!code) { toast('PO code required', 'error'); return; }
+      try {
+        $('#po-edit-link').disabled = true;
+        $('#po-edit-link').textContent = 'Linking + uploading POD…';
+        const r = await api('POST', `/api/rfs/pos/${docId}/link-logiwa`, { logiwaCode: code });
+        if (r.logiwaError) toast('Linked, but Logiwa: ' + r.logiwaError, 'error');
+        else toast(`Linked to Logiwa PO ${r.logiwaCode}`);
+        close();
+        await loadAdminPOReceipts();
+      } catch (e) {
+        toast(e.message, 'error');
+        $('#po-edit-link').disabled = false;
+        $('#po-edit-link').textContent = 'Link to Logiwa PO';
+      }
+    };
+  }
 }
 
 async function loadEventsLog() {

@@ -12,5 +12,6 @@ service cloud.firestore {
     match /rfs_users/{doc}      { allow read, write: if false; }
     match /rfs_invites/{doc}    { allow read, write: if false; }
     match /rfs_events/{doc}     { allow read, write: if false; }
+    match /rfs_notification_rules/{doc} { allow read, write: if false; }
   }
 }
