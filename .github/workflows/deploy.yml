@@ -27,11 +27,36 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and push image
+      # We use --async + a polling loop instead of letting `gcloud builds submit`
+      # stream logs, because the CI service account hits an opaque
+      # "Viewer/Owner" precheck on log streaming even when the project Viewer
+      # role is granted. Full build logs remain available in Cloud Build Console.
+      - name: Submit Cloud Build
+        id: build
         run: |
-          gcloud builds submit \
+          BUILD_ID=$(gcloud builds submit \
             --tag gcr.io/$PROJECT_ID/$SERVICE \
-            --project $PROJECT_ID
+            --project $PROJECT_ID \
+            --async \
+            --format='value(id)')
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "Build started: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=$PROJECT_ID"
+
+      - name: Wait for build to finish
+        run: |
+          BUILD_ID="${{ steps.build.outputs.build_id }}"
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" --project $PROJECT_ID --format='value(status)')
+            echo "[$(date -u +%H:%M:%S)] Build $BUILD_ID: $STATUS"
+            case "$STATUS" in
+              SUCCESS) echo "Build succeeded"; exit 0 ;;
+              FAILURE|TIMEOUT|CANCELLED|INTERNAL_ERROR|EXPIRED)
+                echo "Build ended with status: $STATUS"
+                echo "Logs: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=$PROJECT_ID"
+                exit 1 ;;
+            esac
+            sleep 10
+          done
 
       - name: Deploy to Cloud Run
         run: |
