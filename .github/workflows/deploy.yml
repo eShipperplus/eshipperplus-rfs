@@ -69,5 +69,5 @@ jobs:
             --cpu 1 \
             --max-instances 10 \
             --set-env-vars LOGIWA_ESHIPPER_WH_IDENTIFIER=8320f545-d1d3-4bbc-bf08-b44d11c93b94 \
-            --set-secrets FIREBASE_SERVICE_ACCOUNT=FIREBASE_SA_JSON:latest,LOGIWA_EMAIL=LOGIWA_EMAIL:latest,LOGIWA_PASSWORD=LOGIWA_PASSWORD:latest \
+            --set-secrets FIREBASE_SERVICE_ACCOUNT=FIREBASE_SA_JSON:latest,LOGIWA_EMAIL=LOGIWA_EMAIL:latest,LOGIWA_PASSWORD=LOGIWA_PASSWORD:latest,SMTP_USER=SMTP_USER:latest,SMTP_PASS=SMTP_PASS:latest \
             --project $PROJECT_ID
