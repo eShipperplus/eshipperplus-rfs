@@ -31,7 +31,8 @@ jobs:
         run: |
           gcloud builds submit \
             --tag gcr.io/$PROJECT_ID/$SERVICE \
-            --project $PROJECT_ID
+            --project $PROJECT_ID \
+            --suppress-logs
 
       - name: Deploy to Cloud Run
         run: |
