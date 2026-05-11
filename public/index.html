@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0d3b66" />
+  <title>eShipper+ RFS</title>
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="RFS" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; color: #1a1a1a; height: 100%; }
+    button { font: inherit; cursor: pointer; }
+    input, select, button { font: inherit; }
+    a { color: #0d3b66; }
+
+    .topbar { background: #0d3b66; color: #fff; padding: 8px 16px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 5; min-height: 68px; }
+    .topbar h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    .topbar .brand { display: flex; align-items: center; gap: 12px; }
+    .topbar .brand img { height: 52px; max-width: 180px; object-fit: contain; mix-blend-mode: screen; display: block; }
+    .topbar .brand .tag { font-size: 12px; font-weight: 700; letter-spacing: 2px; opacity: 0.85; text-transform: uppercase; padding-left: 12px; border-left: 1px solid rgba(255,255,255,0.25); }
+    .topbar .who { font-size: 12px; opacity: 0.85; }
+    .tabs { display: flex; background: #fff; border-bottom: 1px solid #e1e4e8; position: sticky; top: 68px; z-index: 4; }
+    .tabs button { flex: 1; padding: 14px 8px; border: none; background: transparent; color: #555; font-weight: 600; border-bottom: 3px solid transparent; }
+    .tabs button.active { color: #0d3b66; border-color: #0d3b66; }
+    .container { max-width: 720px; margin: 0 auto; padding: 16px; padding-bottom: 80px; }
+    .container.wide { max-width: 1400px; }
+    .filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: center; }
+
+    .card { background: #fff; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); border: 1px solid #e8eaed; }
+    .card h3 { margin: 0 0 6px; font-size: 16px; }
+    .card .meta { font-size: 13px; color: #666; line-height: 1.5; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+    .badge.awaiting { background: #fff4d6; color: #8a6500; }
+    .badge.staged { background: #d6e9ff; color: #0d3b66; }
+    .badge.loading { background: #ffe0b3; color: #8a4500; }
+    .badge.loaded { background: #d6f5d6; color: #1f6b1f; }
+    .badge.shipped { background: #c8d6e5; color: #444; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row + .row { margin-top: 6px; }
+    .grow { flex: 1; }
+
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 16px; border-radius: 8px; border: none; background: #0d3b66; color: #fff; font-weight: 600; min-height: 44px; }
+    .btn.secondary { background: #fff; color: #0d3b66; border: 1px solid #c4cdd5; }
+    .btn.danger { background: #c0392b; }
+    .btn.full { width: 100%; }
+    .btn:disabled { opacity: 0.5; }
+
+    input[type=text], input[type=number], input[type=email], select { width: 100%; padding: 12px; border: 1px solid #c4cdd5; border-radius: 8px; font-size: 16px; }
+    label { font-size: 13px; color: #555; font-weight: 600; display: block; margin: 8px 0 4px; }
+
+    .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #1a1a1a; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    .toast.error { background: #c0392b; }
+
+    .loader { text-align: center; color: #888; padding: 24px; }
+    .empty { text-align: center; color: #888; padding: 40px 20px; }
+
+    .scanner-wrap { background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 1 / 1; }
+    #qr-reader { width: 100%; }
+
+    .pallet-row { background: #f7f9fb; padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #e1e4e8; }
+    .pallet-row .row { gap: 6px; }
+    .pallet-row .palletNo { font-weight: 700; color: #0d3b66; min-width: 42px; }
+    .pallet-row .loc { font-family: ui-monospace, monospace; font-size: 14px; }
+
+    .login-screen { padding: 40px 16px; text-align: center; }
+    .login-screen h1 { color: #0d3b66; }
+    .login-form input { margin-bottom: 8px; }
+    .hint { font-size: 12px; color: #777; margin-top: 8px; }
+
+    @media (min-width: 720px) {
+      .container { padding: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="boot-loader" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#f4f6f8;z-index:1000">
+    <img src="/logo.webp" alt="eShipper+" style="height:64px;margin-bottom:12px;object-fit:contain" />
+    <div id="boot-status" style="color:#555;font-size:14px;text-align:center;max-width:320px;padding:0 16px">Loading…</div>
+  </div>
+
+  <div id="login" style="display:none">
+    <div class="login-screen">
+      <img src="/logo.webp" alt="eShipper+" style="height:80px;max-width:240px;object-fit:contain;display:block;margin:0 auto 8px" />
+      <h1 style="margin-top:0;font-size:22px;letter-spacing:2px;color:#0d3b66">RFS</h1>
+      <p class="hint">Putaway and dispatch tracking</p>
+      <div class="login-form" style="max-width: 320px; margin: 24px auto 0">
+        <button class="btn full" id="btn-google">Sign in with Google</button>
+        <p class="hint" style="margin-top:16px">Or sign in with email + password:</p>
+        <input type="email" id="login-email" placeholder="email" />
+        <input type="password" id="login-password" placeholder="password" />
+        <button class="btn full secondary" id="btn-email">Sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="topbar">
+      <div class="brand">
+        <img src="/logo.webp" alt="eShipper+" />
+        <span class="tag">RFS</span>
+      </div>
+      <div>
+        <span class="who" id="who"></span>
+        <button class="btn secondary" id="btn-signout" style="margin-left:8px;padding:6px 10px;min-height:0;font-size:12px">Sign out</button>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-view="scan" class="active">Scan</button>
+      <button data-view="queue" id="tab-queue">Queue</button>
+      <button data-view="receive">Receive PO</button>
+      <button data-view="admin" id="tab-admin" style="display:none">Reports</button>
+    </nav>
+    <div class="container" id="view"></div>
+  </div>
+
+  <div id="toast-host"></div>
+
+  <!-- Install prompt banner — shown when the browser fires beforeinstallprompt -->
+  <div id="install-banner" style="display:none;position:fixed;bottom:16px;left:16px;right:16px;max-width:480px;margin:0 auto;background:#0d3b66;color:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 4px 16px rgba(0,0,0,0.25);z-index:90;align-items:center;gap:10px;font-size:14px">
+    <img src="/icon-192.png" alt="" style="height:32px;width:32px;border-radius:6px;background:#fff;padding:2px" />
+    <div style="flex:1">
+      <div style="font-weight:600">Install eShipper+ RFS</div>
+      <div style="font-size:12px;opacity:0.85">Add to home screen for full-screen mode + faster access</div>
+    </div>
+    <button id="btn-install" style="background:#fff;color:#0d3b66;border:none;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer">Install</button>
+    <button id="btn-install-dismiss" style="background:transparent;color:#fff;border:none;font-size:18px;cursor:pointer;line-height:1;padding:4px 8px">×</button>
+  </div>
+
+  <script>
+    // Service worker registration — gives us offline app shell + installability.
+    // We force an update check on every load so a new deploy can't be masked by stale cache.
+    if ('serviceWorker' in navigator && location.hostname !== 'localhost') {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').then((reg) => {
+          reg.update().catch(() => {});
+          // When a new SW takes over, reload once so the new app shell wins
+          let refreshed = false;
+          navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (refreshed) return;
+            refreshed = true;
+            window.location.reload();
+          });
+        }).catch((err) => console.warn('SW register failed:', err));
+      });
+    }
+
+    // Install prompt — Chrome/Edge fire `beforeinstallprompt` once the PWA criteria pass.
+    let _deferredInstall = null;
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      _deferredInstall = e;
+      // Don't push install on the login screen — wait until the user is in the app
+      const showWhenInApp = () => {
+        if (document.getElementById('app').style.display !== 'none' && !sessionStorage.getItem('rfs-install-dismissed')) {
+          document.getElementById('install-banner').style.display = 'flex';
+        } else {
+          setTimeout(showWhenInApp, 1500);
+        }
+      };
+      showWhenInApp();
+    });
+    document.addEventListener('DOMContentLoaded', () => {
+      const banner = document.getElementById('install-banner');
+      document.getElementById('btn-install')?.addEventListener('click', async () => {
+        if (!_deferredInstall) return;
+        _deferredInstall.prompt();
+        await _deferredInstall.userChoice;
+        _deferredInstall = null;
+        banner.style.display = 'none';
+      });
+      document.getElementById('btn-install-dismiss')?.addEventListener('click', () => {
+        sessionStorage.setItem('rfs-install-dismissed', '1');
+        banner.style.display = 'none';
+      });
+    });
+  </script>
+
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="/firebase-config.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // The RFS frontend uses Firebase Auth only (no client-side Firestore SDK).
+    // All data access goes through the Express API which uses the Admin SDK
+    // (bypasses these rules). So we block ALL client traffic to rfs_* collections.
+    // If a client browser starts reading directly later, change to selectively
+    // allow specific collections — but for now lock everything down.
+    match /rfs_orders/{doc}     { allow read, write: if false; }
+    match /rfs_pos/{doc}        { allow read, write: if false; }
+    match /rfs_locations/{doc}  { allow read, write: if false; }
+    match /rfs_users/{doc}      { allow read, write: if false; }
+    match /rfs_invites/{doc}    { allow read, write: if false; }
+    match /rfs_events/{doc}     { allow read, write: if false; }
+  }
+}

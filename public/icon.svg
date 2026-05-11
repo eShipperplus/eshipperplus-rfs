@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Purple background circle -->
+  <circle cx="256" cy="256" r="256" fill="#5b3d8f"/>
+
+  <!-- Outer ring arc - white, bottom-left sweep -->
+  <path d="M 160 310
+             A 110 110 0 1 1 330 190"
+        fill="none" stroke="white" stroke-width="38" stroke-linecap="round"/>
+
+  <!-- Arrow head on white arc (pointing right/up) -->
+  <polyline points="310,168 334,192 308,212"
+            fill="none" stroke="white" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Inner arc - teal, top-right sweep -->
+  <path d="M 352 202
+             A 110 110 0 1 1 182 322"
+        fill="none" stroke="#62c0ae" stroke-width="38" stroke-linecap="round"/>
+
+  <!-- Arrow head on teal arc (pointing left/down) -->
+  <polyline points="202,344 178,320 204,300"
+            fill="none" stroke="#62c0ae" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Red dot accent -->
+  <circle cx="318" cy="148" r="22" fill="#e85555"/>
+</svg>

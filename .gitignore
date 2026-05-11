@@ -1,0 +1,21 @@
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+service-account*.json
+firebase-debug.log
+.vscode/
+.idea/
+import-locations-data.xlsx
+
+env.yaml
+
+# APK + signing artifacts (regenerate via PWABuilder, never commit)
+signing.keystore
+signing-key-info.txt
+*.apk
+*.aab
+Readme.html
+assetlinks.json
+

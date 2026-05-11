@@ -1,0 +1,33 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "rfs_locations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "hasInventory", "order": "ASCENDING" },
+        { "fieldPath": "preventAllocation", "order": "ASCENDING" },
+        { "fieldPath": "lockLocation", "order": "ASCENDING" },
+        { "fieldPath": "currentPalletOrderId", "order": "ASCENDING" },
+        { "fieldPath": "priorityRank", "order": "ASCENDING" },
+        { "fieldPath": "code", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "rfs_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "rfsState", "order": "ASCENDING" },
+        { "fieldPath": "expectedShipmentDate", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "rfs_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "type", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

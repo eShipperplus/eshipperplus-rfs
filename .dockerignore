@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.git
+.github
+*.md
+service-account*.json
+import-locations-data.xlsx
