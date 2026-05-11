@@ -200,10 +200,19 @@ async function dispatchNotifications(event) {
   }
 }
 
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+}
+
 function renderEmailSubject(event) {
   const m = event.meta || {};
   switch (event.type) {
-    case 'order.staged': return `RFS putaway · ${m.orderCode || ''}${m.clientName ? ' · ' + m.clientName : ''}`;
+    case 'order.staged': {
+      const who = m.companyName || m.customerName ||
+        [m.customerFirstName, m.customerLastName].filter(Boolean).join(' ') ||
+        m.clientName || '';
+      return `${m.orderCode || ''}${who ? ' · ' + who : ''}`;
+    }
     case 'bol.uploaded': return `RFS shipped · ${m.orderCode || ''} · ${m.clientName || ''}`;
     case 'po.arrived':  return `PO received · ${m.poCode || ''} · ${m.clientName || ''}`;
     case 'po.blind_received': return `Blind receipt · ${m.clientName || 'client unknown'} · ${m.count} ${m.receiptType}`;
@@ -212,21 +221,23 @@ function renderEmailSubject(event) {
 }
 
 function renderEmailBody(event) {
+  if (event.type === 'order.staged') return renderOrderStagedBody(event);
+  // Generic table body for everything else (BOL upload, PO arrive, etc.)
   const m = event.meta || {};
   const palletList = (m.pallets || []).map(p => {
-    const dims = (p.length || p.width || p.height) ? `${p.length || '—'}×${p.width || '—'}×${p.height || '—'} ${p.dimensionUnit || 'in'}` : '';
-    const wt = p.weight ? `${p.weight} ${p.weightUnit || 'lb'}` : '';
-    return `<tr><td style="padding:4px 12px 4px 0">P${p.palletNo}</td><td style="padding:4px 12px 4px 0">${p.locationCode || '—'}</td><td style="padding:4px 12px 4px 0">${dims}</td><td style="padding:4px 0">${wt}</td></tr>`;
+    const dims = (p.length || p.width || p.height) ? `${p.length || '—'}×${p.width || '—'}×${p.height || '—'} ${esc(p.dimensionUnit || 'in')}` : '';
+    const wt = p.weight ? `${p.weight} ${esc(p.weightUnit || 'lb')}` : '';
+    return `<tr><td style="padding:4px 12px 4px 0">P${p.palletNo}</td><td style="padding:4px 12px 4px 0">${esc(p.locationCode || '—')}</td><td style="padding:4px 12px 4px 0">${dims}</td><td style="padding:4px 0">${wt}</td></tr>`;
   }).join('');
   return `
     <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#1a1a1a">
-      <p><strong>${event.summary || event.type}</strong></p>
+      <p><strong>${esc(event.summary || event.type)}</strong></p>
       <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
-        ${event.actor?.email ? `<tr><td style="padding:2px 12px 2px 0;color:#666">By</td><td>${event.actor.email}</td></tr>` : ''}
-        ${m.orderCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Order</td><td>${m.orderCode}</td></tr>` : ''}
-        ${m.poCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">PO</td><td>${m.poCode}</td></tr>` : ''}
-        ${m.clientName ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Client</td><td>${m.clientName}</td></tr>` : ''}
-        ${m.receiptType ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Received</td><td>${m.count} ${m.receiptType}</td></tr>` : ''}
+        ${event.actor?.email ? `<tr><td style="padding:2px 12px 2px 0;color:#666">By</td><td>${esc(event.actor.email)}</td></tr>` : ''}
+        ${m.orderCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Order</td><td>${esc(m.orderCode)}</td></tr>` : ''}
+        ${m.poCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">PO</td><td>${esc(m.poCode)}</td></tr>` : ''}
+        ${m.clientName ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Client</td><td>${esc(m.clientName)}</td></tr>` : ''}
+        ${m.receiptType ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Received</td><td>${esc(m.count + ' ' + m.receiptType)}</td></tr>` : ''}
       </table>
       ${palletList ? `<p style="margin-top:14px"><strong>Pallets</strong></p>
         <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
@@ -234,6 +245,59 @@ function renderEmailBody(event) {
           ${palletList}
         </table>` : ''}
       <p style="margin-top:14px;color:#777;font-size:12px">eShipper+ RFS · automated notification</p>
+    </div>
+  `;
+}
+
+// Dedicated template for "putaway done" — what CSM gets when an order is staged.
+function renderOrderStagedBody(event) {
+  const m = event.meta || {};
+  const pallets = m.pallets || [];
+  const palletLines = pallets.map(p => {
+    const dimsParts = [p.length, p.width, p.height].map(v => v == null || v === '' ? '—' : v);
+    const dims = (p.length || p.width || p.height)
+      ? `${dimsParts[0]}×${dimsParts[1]}×${dimsParts[2]} ${esc(p.dimensionUnit || 'in')}`
+      : 'dims not recorded';
+    const wt = p.weight ? `${p.weight} ${esc(p.weightUnit || 'lb')}` : 'weight not recorded';
+    return `<li style="margin-bottom:4px"><strong>P${p.palletNo}</strong>: ${dims} · ${wt}</li>`;
+  }).join('');
+
+  // Build address rows only for fields that are populated, keep CSM-friendly labels.
+  const addressFields = [
+    ['First name',    m.customerFirstName],
+    ['Last name',     m.customerLastName],
+    ['Phone',         m.shipmentPhoneNumber],
+    ['Email',         m.customerEmail],
+    ['Address line 1', m.shipmentAddressLine1],
+    ['Address line 2', m.shipmentAddressLine2],
+    ['City',          m.shipmentCity],
+    ['State / region', m.shipmentStateOrRegionName],
+    ['Postal code',   m.shipmentPostalCode],
+    ['Country',       m.shipmentCountryCode],
+  ];
+  const addressRows = addressFields
+    .filter(([, v]) => v)
+    .map(([k, v]) => `<tr><td style="padding:2px 14px 2px 0;color:#666;white-space:nowrap">${k}</td><td>${esc(v)}</td></tr>`)
+    .join('');
+
+  return `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5">
+      <p>Hi Team,</p>
+      <p>The order has <strong>${pallets.length}</strong> pallet${pallets.length === 1 ? '' : 's'} and here are dims and weight:</p>
+      <ul style="margin:8px 0 14px;padding-left:22px">${palletLines}</ul>
+
+      <p style="margin-top:16px"><strong>Shipping address</strong></p>
+      <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px;margin-top:4px">
+        ${addressRows || '<tr><td style="color:#999">(no address on the order in Logiwa)</td></tr>'}
+      </table>
+
+      <table cellspacing="0" cellpadding="0" style="margin-top:18px;border-collapse:collapse;font-size:13px;color:#444">
+        <tr><td style="padding:2px 14px 2px 0;color:#666">Order</td><td><strong>${esc(m.orderCode || '')}</strong></td></tr>
+        ${m.clientName ? `<tr><td style="padding:2px 14px 2px 0;color:#666">Client</td><td>${esc(m.clientName)}</td></tr>` : ''}
+        ${m.companyName ? `<tr><td style="padding:2px 14px 2px 0;color:#666">Company</td><td>${esc(m.companyName)}</td></tr>` : ''}
+      </table>
+
+      <p style="margin-top:18px;color:#777;font-size:12px">eShipper+ RFS · automated notification</p>
     </div>
   `;
 }
@@ -341,6 +405,17 @@ async function runSync(actor) {
       clientIdentifier: o.clientIdentifier,
       clientName: o.clientDisplayName,
       customerName: o.customerFullName || `${o.customerFirstName || ''} ${o.customerLastName || ''}`.trim(),
+      customerFirstName: o.customerFirstName || null,
+      customerLastName: o.customerLastName || null,
+      customerEmail: o.customerEmail || null,
+      companyName: o.companyName || null,
+      shipmentAddressLine1: o.shipmentAddressLine1 || null,
+      shipmentAddressLine2: o.shipmentAddressLine2 || null,
+      shipmentCity: o.shipmentCity || null,
+      shipmentPostalCode: o.shipmentPostalCode || null,
+      shipmentStateOrRegionName: o.shipmentStateOrRegionName || null,
+      shipmentCountryCode: o.shipmentCountryCode || null,
+      shipmentPhoneNumber: o.shipmentPhoneNumber || null,
       totalQuantity: o.totalQuantity || 0,
       totalWeight: o.totalWeight || 0,
       expectedShipmentDate: o.expectedShipmentDate || null,
@@ -568,6 +643,18 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
       meta: {
         orderCode: fresh.logiwaCode,
         clientName: fresh.clientName,
+        customerName: fresh.customerName,
+        customerFirstName: fresh.customerFirstName,
+        customerLastName: fresh.customerLastName,
+        customerEmail: fresh.customerEmail,
+        companyName: fresh.companyName,
+        shipmentAddressLine1: fresh.shipmentAddressLine1,
+        shipmentAddressLine2: fresh.shipmentAddressLine2,
+        shipmentCity: fresh.shipmentCity,
+        shipmentPostalCode: fresh.shipmentPostalCode,
+        shipmentStateOrRegionName: fresh.shipmentStateOrRegionName,
+        shipmentCountryCode: fresh.shipmentCountryCode,
+        shipmentPhoneNumber: fresh.shipmentPhoneNumber,
         rfsState: fresh.rfsState,
         pallets: fresh.pallets,
       },
