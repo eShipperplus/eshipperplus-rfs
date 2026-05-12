@@ -1,7 +1,15 @@
 // eShipper+ RFS service worker — offline shell + asset cache.
 // Bump CACHE when shipping a release to force old workers to drop their cache.
-const CACHE = 'rfs-v3-2026-05-08';
+const CACHE = 'rfs-v4-2026-05-12';
 const STATIC = ['/'];
+
+// Treat HTML AND JS as network-first so a deploy is reflected on the next
+// page load instead of requiring a second refresh. Static assets (icons,
+// images, etc.) stay cache-first for speed.
+function isDynamic(url, accept) {
+  const p = url.pathname;
+  return p === '/' || p.endsWith('.html') || p.endsWith('.js') || (accept && accept.includes('text/html'));
+}
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
@@ -32,8 +40,9 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Network-first for HTML so the app shell stays fresh; fall back to cached / on offline.
-  if (e.request.headers.get('accept')?.includes('text/html')) {
+  // Network-first for HTML + JS so a deploy is reflected immediately. Falls back
+  // to cache only if the network is unreachable (true offline).
+  if (isDynamic(url, e.request.headers.get('accept'))) {
     e.respondWith(
       fetch(e.request)
         .then((res) => {
@@ -41,12 +50,12 @@ self.addEventListener('fetch', (e) => {
           caches.open(CACHE).then((c) => c.put(e.request, clone));
           return res;
         })
-        .catch(() => caches.match('/'))
+        .catch(() => caches.match(e.request).then(c => c || caches.match('/')))
     );
     return;
   }
 
-  // Cache-first for everything else (JS/CSS/images/icons).
+  // Cache-first for everything else (CSS/images/icons/fonts).
   e.respondWith(
     caches.match(e.request).then((cached) => {
       if (cached) return cached;
