@@ -23,6 +23,9 @@ const state = {
   scanner: null,
   syncTimer: null,
   lastSyncAt: null,
+  // When true, renderOrderDetail forces the putaway form regardless of order state.
+  // Lets workers fix dims/weight/locations after the order has been saved.
+  editPutaway: false,
 };
 
 const AUTO_SYNC_MS = 5 * 60 * 1000;
@@ -173,6 +176,7 @@ document.querySelectorAll('#tabs button').forEach(b => {
     state.view = b.dataset.view;
     state.selectedOrderId = null;
     state.selectedPOId = null;
+    state.editPutaway = false;
     stopScanner();
     stopBolStream();
     render();
@@ -319,10 +323,12 @@ async function renderOrderDetail() {
       </div>
       <div id="action-area"></div>
     `;
-    $('#btn-back').onclick = () => { state.selectedOrderId = null; stopScanner(); stopBolStream(); render(); };
+    $('#btn-back').onclick = () => { state.selectedOrderId = null; state.editPutaway = false; stopScanner(); stopBolStream(); render(); };
 
     const area = $('#action-area');
-    if (isAwaiting) renderPutawayForm(area, order);
+    // If user explicitly opened "Edit putaway details" on a staged/loading/loaded order,
+    // force the putaway form so they can fix dims/weight/locations.
+    if (isAwaiting || state.editPutaway) renderPutawayForm(area, order);
     else if (isStaged || isLoading) renderLoadingArea(area, order);
     else if (isLoaded) renderBOLUpload(area, order);
     else if (order.rfsState === 'shipped' || order.rfsState === 'archived_externally') {
@@ -360,7 +366,18 @@ async function renderOrderDetail() {
 
 // ─── putaway form ────────────────────────────────────────────────────────────
 function renderPutawayForm(area, order) {
+  const editing = state.editPutaway && order.rfsState !== 'awaiting_putaway';
+  const editingBanner = editing ? `
+    <div class="card" style="background:#fff7d6;border:1px solid #f5c542;padding:10px 12px">
+      <div class="row" style="align-items:center;gap:10px">
+        <strong style="color:#8a6500">Editing pallet details</strong>
+        <span class="grow hint" style="color:#8a6500">Order is already <strong>${escape(order.rfsState.replace('_',' '))}</strong>. Changes won't unload any loaded pallets.</span>
+        <button class="btn secondary" id="btn-cancel-edit" style="padding:6px 12px;min-height:0;font-size:12px">Cancel</button>
+      </div>
+    </div>
+  ` : '';
   area.innerHTML = `
+    ${editingBanner}
     <div class="card">
       <h3>Putaway pallets</h3>
       <label>How many pallets for this order?</label>
@@ -371,6 +388,9 @@ function renderPutawayForm(area, order) {
   `;
   $('#btn-build').onclick = () => buildPalletRows(parseInt($('#pallet-count').value, 10) || 1, order.pallets);
   if ((order.pallets||[]).length) buildPalletRows(order.pallets.length, order.pallets);
+  if (editing) {
+    $('#btn-cancel-edit').onclick = () => { state.editPutaway = false; render(); };
+  }
 }
 
 async function buildPalletRows(count, existing) {
@@ -382,12 +402,13 @@ async function buildPalletRows(count, existing) {
     suggestions = r.locations || [];
   } catch (e) { /* fallback to free-text */ }
 
-  const dlistOpts = suggestions.slice(0, 100).map(l => `<option value="${escape(l.code)}">`).join('');
+  // "Floor" is always at the top — pallets on the warehouse floor, no specific rack.
+  const dlistOpts = '<option value="Floor"></option>' + suggestions.slice(0, 100).map(l => `<option value="${escape(l.code)}">`).join('');
   host.innerHTML = `
     <datalist id="loc-options">${dlistOpts}</datalist>
     <div class="card">
       <h3>Assign locations + dims/weight</h3>
-      <div class="hint" style="margin-bottom:8px">Codes starting with <strong>26-</strong> are prioritized. Fill in what you have — partial saves are kept.</div>
+      <div class="hint" style="margin-bottom:8px">Codes starting with <strong>26-</strong> are prioritized. Type <strong>Floor</strong> for pallets sitting on the warehouse floor. Partial saves are kept.</div>
       <div id="rows"></div>
       <div class="row" style="margin-top:8px">
         <button class="btn secondary" id="btn-add-row" style="flex:0 0 auto">+ Add pallet</button>
@@ -503,6 +524,7 @@ async function savePutaway(rows) {
     const filled = pallets.filter(p => p.locationCode).length;
     if (filled === pallets.length) toast(`All ${pallets.length} pallets staged — ready for pickup`);
     else toast(`Saved. ${filled}/${pallets.length} pallets placed.`);
+    state.editPutaway = false;
     render();
   } catch (e) { toast(e.message, 'error'); }
   finally { btn.disabled = false; btn.textContent = 'Save'; }
@@ -512,23 +534,34 @@ async function savePutaway(rows) {
 function renderLoadingArea(area, order) {
   area.innerHTML = `
     <div class="card">
-      <h3>Pallet locations</h3>
+      <div class="row" style="margin-bottom:8px;align-items:center">
+        <h3 class="grow" style="margin:0">Pallet locations</h3>
+        <button class="btn secondary" id="btn-edit-putaway" style="padding:6px 12px;min-height:0;font-size:12px">Edit putaway details</button>
+      </div>
       <div id="pallets"></div>
     </div>
   `;
+  $('#btn-edit-putaway').onclick = () => { state.editPutaway = true; render(); };
+
   const host = $('#pallets');
   for (const p of (order.pallets || [])) {
     const dimsLine = (p.length || p.width || p.height || p.weight)
       ? `<div class="hint" style="margin-top:4px">Dims: ${p.length || '—'} × ${p.width || '—'} × ${p.height || '—'} ${escape(p.dimensionUnit || 'in')} · Weight: ${p.weight || '—'} ${escape(p.weightUnit || 'lb')}</div>`
       : '<div class="hint" style="margin-top:4px;color:#999">No dims/weight recorded</div>';
+    let action;
+    if (p.state === 'loaded') {
+      action = `<button class="btn secondary" data-unload="${p.palletNo}" style="padding:8px 14px;min-height:0">Mark unloaded</button>`;
+    } else if (p.locationCode) {
+      action = `<button class="btn" data-load="${p.palletNo}" style="padding:8px 14px;min-height:0">Mark loaded</button>`;
+    } else {
+      action = '<span class="badge awaiting">pending</span>';
+    }
     const r = el(`
       <div class="pallet-row">
         <div class="row">
           <span class="palletNo">P${p.palletNo}</span>
-          <span class="loc grow">${escape(p.locationCode || '— not yet placed —')}</span>
-          ${p.state === 'loaded'
-            ? '<span class="badge loaded">loaded</span>'
-            : (p.locationCode ? `<button class="btn" data-load="${p.palletNo}" style="padding:8px 14px;min-height:0">Mark loaded</button>` : '<span class="badge awaiting">pending</span>')}
+          <span class="loc grow">${escape(p.locationCode || '— not yet placed —')}${p.state === 'loaded' ? ' <span class="badge loaded" style="margin-left:6px">loaded</span>' : ''}</span>
+          ${action}
         </div>
         ${dimsLine}
       </div>
@@ -544,13 +577,28 @@ function renderLoadingArea(area, order) {
       } catch (e) { toast(e.message, 'error'); b.disabled = false; }
     };
   });
+  host.querySelectorAll('button[data-unload]').forEach(b => {
+    b.onclick = async () => {
+      const palletNo = b.dataset.unload;
+      if (!confirm(`Mark pallet P${palletNo} as unloaded? It'll go back to the staged list.`)) return;
+      try {
+        b.disabled = true;
+        await api('POST', `/api/rfs/orders/${state.selectedOrderId}/unload-pallet`, { palletNo: parseInt(palletNo, 10) });
+        toast(`P${palletNo} unloaded`);
+        render();
+      } catch (e) { toast(e.message, 'error'); b.disabled = false; }
+    };
+  });
 }
 
 // ─── BOL upload ──────────────────────────────────────────────────────────────
 function renderBOLUpload(area, order) {
   area.innerHTML = `
     <div class="card">
-      <h3>Upload BOL</h3>
+      <div class="row" style="margin-bottom:8px;align-items:center">
+        <h3 class="grow" style="margin:0">Upload BOL</h3>
+        <button class="btn secondary" id="btn-edit-putaway-bol" style="padding:6px 12px;min-height:0;font-size:12px">Edit putaway details</button>
+      </div>
       <div class="meta" style="margin-bottom:8px">All pallets loaded. Snap a photo of the signed BOL to ship.</div>
       <div id="bol-cam-area">
         <video id="bol-video" style="width:100%;max-height:75vh;border-radius:8px;background:#000;object-fit:contain;display:block" playsinline autoplay muted></video>
@@ -568,6 +616,9 @@ function renderBOLUpload(area, order) {
       <button class="btn full" id="btn-upload-bol" style="margin-top:10px" disabled>Upload BOL</button>
     </div>
   `;
+
+  // Edit-putaway button is at the top of the BOL screen — same flow as on the loading screen.
+  $('#btn-edit-putaway-bol')?.addEventListener('click', () => { state.editPutaway = true; stopBolStream(); render(); });
 
   let capturedBlob = null;
   const video = $('#bol-video');
@@ -733,33 +784,61 @@ function renderLocationDetail({ location, currentOrder, currentPallet }) {
 }
 
 // ─── scanner (html5-qrcode) ──────────────────────────────────────────────────
+// openScanner works in two contexts:
+//  - When a `#qr-reader` div exists on the page (Scan tab, Receive PO tab) — use that inline.
+//  - Otherwise — create a full-screen modal with a fresh `#qr-reader` so any "Scan" button
+//    in the app (putaway location input, etc.) can open the camera on demand.
 function openScanner(onResult) {
   stopScanner();
-  const target = document.getElementById('qr-reader');
-  if (!target) return;
+  let target = document.getElementById('qr-reader');
+  let modal = null;
+
+  if (!target) {
+    modal = el(`
+      <div id="scan-modal" style="position:fixed;inset:0;background:#000;z-index:1500;display:flex;flex-direction:column">
+        <div style="padding:14px 16px;color:#fff;display:flex;align-items:center;justify-content:space-between;background:#0d3b66">
+          <strong style="font-size:15px">Scan barcode</strong>
+          <button id="scan-close-btn" style="background:transparent;border:none;color:#fff;font-size:28px;cursor:pointer;line-height:1">×</button>
+        </div>
+        <div id="qr-reader" style="flex:1;background:#000;width:100%"></div>
+        <div style="padding:14px 16px;text-align:center;color:#fff;font-size:13px;opacity:0.85">Position the barcode in the frame…</div>
+      </div>
+    `);
+    document.body.appendChild(modal);
+    target = document.getElementById('qr-reader');
+    state.scanModal = modal;
+    modal.querySelector('#scan-close-btn').onclick = () => stopScanner();
+  }
+
   if (typeof Html5Qrcode === 'undefined') {
-    target.innerHTML = '<div class="empty" style="background:#fff;border-radius:8px">Camera scanner unavailable. Use the manual input below.</div>';
+    target.innerHTML = '<div class="empty" style="background:#fff;border-radius:8px;margin:16px">Camera scanner library unavailable. Type the code instead.</div>';
     return;
   }
+
   try {
     const scanner = new Html5Qrcode('qr-reader');
     state.scanner = scanner;
     scanner.start(
       { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 240, height: 240 } },
+      { fps: 10, qrbox: { width: 280, height: 180 } },
       (decoded) => { stopScanner(); onResult(decoded); },
       () => {}
     ).catch(err => {
-      target.innerHTML = `<div class="empty" style="background:#fff;border-radius:8px">Camera not available: ${escape(err.message || err)}. Use manual input below.</div>`;
+      target.innerHTML = `<div class="empty" style="background:#fff;border-radius:8px;margin:16px">Camera not available: ${escape(err.message || err)}. Type the code instead.</div>`;
     });
   } catch (e) {
-    target.innerHTML = `<div class="empty" style="background:#fff;border-radius:8px">Scanner error: ${escape(e.message)}. Use manual input below.</div>`;
+    target.innerHTML = `<div class="empty" style="background:#fff;border-radius:8px;margin:16px">Scanner error: ${escape(e.message)}. Type the code instead.</div>`;
   }
 }
+
 function stopScanner() {
   if (state.scanner) {
     try { state.scanner.stop().catch(() => {}).finally(() => { state.scanner = null; }); }
     catch { state.scanner = null; }
+  }
+  if (state.scanModal) {
+    try { state.scanModal.remove(); } catch {}
+    state.scanModal = null;
   }
 }
 

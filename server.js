@@ -355,10 +355,15 @@ async function ensurePdf(buffer, mimeType) {
 
 // Resolve a location from a scanned/typed input. Matches on either `code` (e.g. "26-B-04")
 // or `locationBarcode` (e.g. "26B04" — what's printed on the warehouse shelf).
-// Returns { ref, snap, code } where `code` is the canonical form from the stored doc.
+// Returns { ref, snap, code, isFloor? } where `code` is the canonical form from the stored doc.
+// Special case: "Floor" (any case) resolves to a pseudo-location with `isFloor: true`. The Floor
+// has no Firestore doc and no occupancy lock — many pallets can sit on the warehouse floor.
 async function findLocation(tx, codeInput) {
   if (!codeInput) return null;
   const q = String(codeInput).trim();
+  if (q.toLowerCase() === 'floor') {
+    return { ref: null, snap: null, code: 'Floor', isFloor: true };
+  }
   const tryCodes = [...new Set([q, q.toUpperCase(), q.toLowerCase()])];
 
   // 1. Doc-id lookup (matches `code` exactly, with case variations)
@@ -538,12 +543,18 @@ app.get('/api/rfs/orders', requireAuth, async (req, res) => {
   }
 });
 
-// Find one order by Logiwa code (used by mobile scan)
+// Find one order by Logiwa code (used by mobile scan) — case-insensitive.
+// Tries the input as-typed, then upper, then lower. Logiwa codes are usually consistent
+// per order but workers often type them with different casing.
 app.get('/api/rfs/orders/by-code/:code', requireAuth, async (req, res) => {
   try {
-    const snap = await db.collection('rfs_orders').where('logiwaCode', '==', req.params.code).limit(1).get();
-    if (snap.empty) return res.status(404).json({ error: 'Order not found' });
-    res.json({ order: snap.docs[0].data() });
+    const q = String(req.params.code).trim();
+    const candidates = [...new Set([q, q.toUpperCase(), q.toLowerCase()])];
+    for (const c of candidates) {
+      const snap = await db.collection('rfs_orders').where('logiwaCode', '==', c).limit(1).get();
+      if (!snap.empty) return res.json({ order: snap.docs[0].data() });
+    }
+    res.status(404).json({ error: 'Order not found' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -573,18 +584,21 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
       const prevByNo = new Map((order.pallets || []).map(p => [p.palletNo, p]));
 
       // Resolve any provided locationCodes case-insensitively + validate. Empty locationCode is allowed (partial save).
-      const locResolved = new Map(); // palletNo -> { ref, code }
+      const locResolved = new Map(); // palletNo -> { ref, code, isFloor }
       for (const p of pallets) {
         if (!p.locationCode) continue;
         const found = await findLocation(tx, p.locationCode);
         if (!found) throw new Error(`Location ${p.locationCode} not found`);
-        const loc = found.snap.data();
-        if (loc.lockLocation) throw new Error(`Location ${found.code} is locked`);
-        if (loc.preventAllocation) throw new Error(`Location ${found.code} prevents allocation`);
-        if (loc.currentPalletOrderId && loc.currentPalletOrderId !== req.params.id) {
-          throw new Error(`Location ${found.code} is already holding ${loc.currentPalletOrderCode} pallet ${loc.currentPalletNo}`);
+        // Floor is special — many pallets can sit on the floor; skip the lock/occupancy checks.
+        if (!found.isFloor) {
+          const loc = found.snap.data();
+          if (loc.lockLocation) throw new Error(`Location ${found.code} is locked`);
+          if (loc.preventAllocation) throw new Error(`Location ${found.code} prevents allocation`);
+          if (loc.currentPalletOrderId && loc.currentPalletOrderId !== req.params.id) {
+            throw new Error(`Location ${found.code} is already holding ${loc.currentPalletOrderCode} pallet ${loc.currentPalletNo}`);
+          }
         }
-        locResolved.set(p.palletNo, { ref: found.ref, code: found.code });
+        locResolved.set(p.palletNo, { ref: found.ref, code: found.code, isFloor: !!found.isFloor });
       }
 
       // Build new pallets array, merging with previous to preserve timestamps + already-loaded state
@@ -598,16 +612,19 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
 
       const newCodes = new Set(newPallets.filter(p => p.locationCode).map(p => p.locationCode));
 
-      // Free any previously-staged locations no longer referenced by the new pallets array
+      // Free any previously-staged locations no longer referenced by the new pallets array.
+      // Floor is skipped — there's no doc to free.
       for (const old of (order.pallets || [])) {
         if (old.locationCode && !newCodes.has(old.locationCode) && old.state !== 'loaded') {
+          if (String(old.locationCode).toLowerCase() === 'floor') continue;
           const oldLocRef = db.collection('rfs_locations').doc(locDocId(old.locationCode));
           tx.update(oldLocRef, { currentPalletOrderId: null, currentPalletOrderCode: null, currentPalletNo: null });
         }
       }
 
-      // Lock the resolved locations to this order
-      for (const [palletNo, { ref }] of locResolved) {
+      // Lock the resolved locations to this order. Skip Floor — no doc, no lock.
+      for (const [palletNo, { ref, isFloor }] of locResolved) {
+        if (isFloor || !ref) continue;
         tx.update(ref, {
           currentPalletOrderId: req.params.id,
           currentPalletOrderCode: order.logiwaCode,
@@ -681,7 +698,9 @@ app.post('/api/rfs/orders/:id/load-pallet', requireAuth, async (req, res) => {
       const order = orderSnap.data();
       const targetPallet = (order.pallets || []).find(p => p.palletNo === palletNo);
       let foundLoc = null;
-      if (targetPallet?.locationCode && targetPallet.state !== 'loaded') {
+      // Floor has no doc to free — skip the lookup entirely for it.
+      if (targetPallet?.locationCode && targetPallet.state !== 'loaded'
+          && String(targetPallet.locationCode).toLowerCase() !== 'floor') {
         foundLoc = await findLocation(tx, targetPallet.locationCode);
       }
 
@@ -699,7 +718,9 @@ app.post('/api/rfs/orders/:id/load-pallet', requireAuth, async (req, res) => {
       if (allLoaded) { updates.loadedAt = Timestamp.now(); updates.loadedBy = req.email; }
       tx.update(orderRef, updates);
 
-      if (foundLoc) tx.update(foundLoc.ref, { currentPalletOrderId: null, currentPalletOrderCode: null, currentPalletNo: null });
+      if (foundLoc && !foundLoc.isFloor && foundLoc.ref) {
+        tx.update(foundLoc.ref, { currentPalletOrderId: null, currentPalletOrderCode: null, currentPalletNo: null });
+      }
     });
 
     const fresh = (await db.collection('rfs_orders').doc(req.params.id).get()).data();
@@ -719,6 +740,91 @@ app.post('/api/rfs/orders/:id/load-pallet', requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('load-pallet error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── Unload a pallet ─────────────────────────────────────────────────────────
+// Reverses a load-pallet action. Sets the pallet state back to staged (or pending if no
+// location), re-locks the location if it's still free, and downgrades the order's rfsState.
+app.post('/api/rfs/orders/:id/unload-pallet', requireAuth, async (req, res) => {
+  try {
+    const { palletNo } = req.body;
+    if (palletNo === undefined) return res.status(400).json({ error: 'palletNo required' });
+
+    await db.runTransaction(async (tx) => {
+      const orderRef = db.collection('rfs_orders').doc(req.params.id);
+      // ── ALL READS FIRST ─────────────────────────────────────────────
+      const orderSnap = await tx.get(orderRef);
+      if (!orderSnap.exists) throw new Error('Order not found');
+      const order = orderSnap.data();
+      const targetPallet = (order.pallets || []).find(p => p.palletNo === palletNo);
+      if (!targetPallet) throw new Error(`Pallet ${palletNo} not found`);
+      if (targetPallet.state !== 'loaded') throw new Error('Pallet is not in loaded state');
+
+      let foundLoc = null;
+      let canRelock = true;
+      if (targetPallet.locationCode && String(targetPallet.locationCode).toLowerCase() !== 'floor') {
+        foundLoc = await findLocation(tx, targetPallet.locationCode);
+        if (foundLoc && !foundLoc.isFloor) {
+          const loc = foundLoc.snap.data();
+          if (loc.currentPalletOrderId && loc.currentPalletOrderId !== req.params.id) {
+            canRelock = false; // Another order has taken the slot in the meantime
+          }
+        }
+      }
+
+      // ── THEN ALL WRITES ─────────────────────────────────────────────
+      const pallets = (order.pallets || []).map(p => {
+        if (p.palletNo !== palletNo) return p;
+        return {
+          ...p,
+          state: p.locationCode ? 'staged' : 'pending',
+          loadedAt: null,
+          loadedBy: null,
+          updatedAt: Timestamp.now(),
+          updatedBy: req.email,
+        };
+      });
+
+      const allLoaded = pallets.length > 0 && pallets.every(p => p.state === 'loaded');
+      const anyLoaded = pallets.some(p => p.state === 'loaded');
+      const anyStaged = pallets.some(p => p.state === 'staged');
+      let newOrderState;
+      if (allLoaded) newOrderState = 'loaded';
+      else if (anyLoaded) newOrderState = 'loading';
+      else if (anyStaged) newOrderState = 'staged';
+      else newOrderState = 'awaiting_putaway';
+
+      const updates = { pallets, rfsState: newOrderState };
+      if (newOrderState !== 'loaded') {
+        updates.loadedAt = FieldValue.delete();
+        updates.loadedBy = FieldValue.delete();
+      }
+      tx.update(orderRef, updates);
+
+      if (foundLoc && !foundLoc.isFloor && foundLoc.ref && canRelock) {
+        tx.update(foundLoc.ref, {
+          currentPalletOrderId: req.params.id,
+          currentPalletOrderCode: order.logiwaCode,
+          currentPalletNo: palletNo,
+        });
+      }
+    });
+
+    const fresh = (await db.collection('rfs_orders').doc(req.params.id).get()).data();
+    await logEvent({
+      type: 'pallet.unloaded',
+      actor: req.user,
+      subjectType: 'order',
+      subjectId: req.params.id,
+      summary: `${fresh.logiwaCode}: P${palletNo} unloaded — order now ${fresh.rfsState}`,
+      meta: { orderCode: fresh.logiwaCode, palletNo, rfsState: fresh.rfsState },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('unload-pallet error:', err.message);
     res.status(400).json({ error: err.message });
   }
 });
@@ -1414,7 +1520,7 @@ app.get('/api/rfs/admin/pos', requireAuth, requireRole(...REPORT_ROLES), async (
 });
 
 // ─── Notification rules (admin) ──────────────────────────────────────────────
-const NOTIFY_EVENTS = ['order.staged', 'pallet.loaded', 'bol.uploaded', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
+const NOTIFY_EVENTS = ['order.staged', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
 const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight'];
 
 app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
