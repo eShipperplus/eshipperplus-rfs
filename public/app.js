@@ -318,12 +318,35 @@ async function renderOrderDetail() {
           <div>Qty: ${order.totalQuantity || 0} · Weight: ${order.totalWeight || 0}</div>
           ${order.bolReference ? `<div>BOL ref: ${escape(order.bolReference)}</div>` : ''}
           ${order.proNumber ? `<div>PRO: ${escape(order.proNumber)}</div>` : ''}
-          ${order.note ? `<div>Note: ${escape(order.note)}</div>` : ''}
+          ${order.note ? `<div>Logiwa note: ${escape(order.note)}</div>` : ''}
         </div>
       </div>
+
+      <div class="card">
+        <div class="row" style="margin-bottom:6px;align-items:center">
+          <h3 class="grow" style="margin:0;font-size:15px">Internal notes</h3>
+          <span class="hint" style="font-size:11px">not sent in emails</span>
+        </div>
+        <textarea id="order-note" rows="3" placeholder="Add a note for the warehouse / CSM team…" style="width:100%;padding:8px;border:1px solid #c4cdd5;border-radius:8px;font-size:14px;font-family:inherit;resize:vertical">${escape(order.internalNote || '')}</textarea>
+        <div class="row" style="margin-top:6px;align-items:center">
+          <span class="hint grow" id="note-meta">${order.internalNoteUpdatedAt ? 'Last updated ' + fmtTs(order.internalNoteUpdatedAt) + ' by ' + escape(order.internalNoteUpdatedBy || '') : ''}</span>
+          <button class="btn secondary" id="btn-save-note" style="padding:6px 14px;min-height:0;font-size:12px">Save note</button>
+        </div>
+      </div>
+
       <div id="action-area"></div>
     `;
     $('#btn-back').onclick = () => { state.selectedOrderId = null; state.editPutaway = false; stopScanner(); stopBolStream(); render(); };
+    $('#btn-save-note').onclick = async () => {
+      const btn = $('#btn-save-note');
+      try {
+        btn.disabled = true; btn.textContent = 'Saving…';
+        await api('PUT', `/api/rfs/orders/${state.selectedOrderId}/note`, { note: $('#order-note').value });
+        toast('Note saved');
+        $('#note-meta').textContent = `Last updated just now by ${state.user.email}`;
+      } catch (e) { toast(e.message, 'error'); }
+      finally { btn.disabled = false; btn.textContent = 'Save note'; }
+    };
 
     const area = $('#action-area');
     // If user explicitly opened "Edit putaway details" on a staged/loading/loaded order,
@@ -345,6 +368,22 @@ async function renderOrderDetail() {
           </div>
         `;
       }).join('');
+      // Bridge legacy single-BOL fields for old orders that don't have bols[] yet
+      let bols = Array.isArray(order.bols) ? [...order.bols] : [];
+      if (!bols.length && order.bolPhotoUrl) {
+        bols.push({ photoUrl: order.bolPhotoUrl, uploadedAt: order.bolUploadedAt, uploadedBy: order.bolUploadedBy, truckLabel: null });
+      }
+      const bolRows = bols.map((b, i) => `
+        <div class="pallet-row" style="margin-bottom:6px">
+          <div class="row" style="align-items:center;gap:10px">
+            <div class="grow">
+              <div><strong>BOL ${i + 1}</strong>${b.truckLabel ? ' · ' + escape(b.truckLabel) : ''}</div>
+              <div class="hint">${fmtTs(b.uploadedAt)} ${b.uploadedBy ? '· ' + escape(b.uploadedBy) : ''}${b.logiwaError ? ' · <span style="color:#c0392b">Logiwa: ' + escape(b.logiwaError) + '</span>' : ''}</div>
+            </div>
+            ${b.photoUrl ? `<a href="${escape(b.photoUrl)}" target="_blank" class="btn secondary" style="padding:6px 12px;min-height:0;font-size:12px">View</a>` : ''}
+          </div>
+        </div>
+      `).join('');
       area.innerHTML = `
         <div class="card">
           <h3>${order.rfsState === 'shipped' ? 'Shipped' : 'Archived'}</h3>
@@ -353,8 +392,8 @@ async function renderOrderDetail() {
               ? `Completed by ${escape(order.shippedBy || '')} on ${fmtTs(order.shippedAt)}`
               : `Order is no longer Ready to Ship in Logiwa.${order.archivedReason ? '<br>' + escape(order.archivedReason) : ''}`}
           </div>
-          ${order.bolPhotoUrl ? `<a href="${escape(order.bolPhotoUrl)}" target="_blank" class="btn full" style="margin-top:10px">View BOL photo</a>` : ''}
         </div>
+        ${bols.length ? `<div class="card"><h3>BOLs (${bols.length})</h3>${bolRows}</div>` : ''}
         <div class="card">
           <h3>Pallets</h3>
           ${palletRows || '<div class="empty" style="padding:16px">No pallets recorded.</div>'}
@@ -593,13 +632,49 @@ function renderLoadingArea(area, order) {
 
 // ─── BOL upload ──────────────────────────────────────────────────────────────
 function renderBOLUpload(area, order) {
+  // Build the list of uploaded BOLs. Bridge legacy single-BOL fields into the new array
+  // so older orders display correctly without a migration.
+  let bols = Array.isArray(order.bols) ? [...order.bols] : [];
+  if (!bols.length && order.bolPhotoUrl) {
+    bols.push({
+      photoUrl: order.bolPhotoUrl,
+      uploadedAt: order.bolUploadedAt,
+      uploadedBy: order.bolUploadedBy,
+      truckLabel: null,
+      logiwaError: order.logiwaUploadError || null,
+    });
+  }
+
+  const bolsHtml = bols.length ? bols.map((b, i) => `
+    <div class="pallet-row" style="margin-bottom:6px">
+      <div class="row" style="align-items:center;gap:10px">
+        <div class="grow">
+          <div><strong>BOL ${i + 1}</strong>${b.truckLabel ? ' · ' + escape(b.truckLabel) : ''}</div>
+          <div class="hint" style="margin-top:2px">${fmtTs(b.uploadedAt)} · ${escape(b.uploadedBy || '')}${b.logiwaError ? ' · <span style="color:#c0392b">Logiwa: ' + escape(b.logiwaError) + '</span>' : ' · <span style="color:#1f6b1f">in Logiwa</span>'}</div>
+        </div>
+        ${b.photoUrl ? `<a href="${escape(b.photoUrl)}" target="_blank" class="btn secondary" style="padding:6px 12px;min-height:0;font-size:12px">View</a>` : ''}
+      </div>
+    </div>
+  `).join('') : '<div class="meta">No BOL uploaded yet.</div>';
+
   area.innerHTML = `
+    ${bols.length ? `
+      <div class="card">
+        <h3>Uploaded BOLs (${bols.length})</h3>
+        ${bolsHtml}
+      </div>
+    ` : ''}
+
     <div class="card">
       <div class="row" style="margin-bottom:8px;align-items:center">
-        <h3 class="grow" style="margin:0">Upload BOL</h3>
+        <h3 class="grow" style="margin:0">${bols.length ? 'Upload another BOL' : 'Upload BOL'}</h3>
         <button class="btn secondary" id="btn-edit-putaway-bol" style="padding:6px 12px;min-height:0;font-size:12px">Edit putaway details</button>
       </div>
-      <div class="meta" style="margin-bottom:8px">All pallets loaded. Snap a photo of the signed BOL to ship.</div>
+      <div class="meta" style="margin-bottom:8px">All pallets loaded. Snap a photo of the signed BOL — one per truck. The order stays "loaded" until you tap <strong>Mark order shipped</strong> below.</div>
+
+      <label>Truck / driver label (optional)</label>
+      <input type="text" id="bol-truck" placeholder="e.g. Truck 1, Maersk #12345" style="margin-bottom:10px" />
+
       <div id="bol-cam-area">
         <video id="bol-video" style="width:100%;max-height:75vh;border-radius:8px;background:#000;object-fit:contain;display:block" playsinline autoplay muted></video>
         <div id="bol-cam-status" class="hint" style="text-align:center;margin:6px 0">Starting camera…</div>
@@ -614,6 +689,12 @@ function renderBOLUpload(area, order) {
         <button class="btn secondary full" id="btn-retake" style="margin-top:8px">Retake</button>
       </div>
       <button class="btn full" id="btn-upload-bol" style="margin-top:10px" disabled>Upload BOL</button>
+    </div>
+
+    <div class="card" style="background:#f4f9f4;border:1px solid #c8e6c8">
+      <h3 style="margin-top:0;color:#1f6b1f">Done loading this order?</h3>
+      <div class="meta" style="margin-bottom:8px">Tap below to mark the order shipped. ${bols.length === 0 ? 'You can mark shipped even without a BOL on file (upload one later).' : 'You can still upload additional BOLs after shipping if needed.'}</div>
+      <button class="btn full" id="btn-mark-shipped" style="background:#1f6b1f">Mark order shipped</button>
     </div>
   `;
 
@@ -694,12 +775,15 @@ function renderBOLUpload(area, order) {
     const ext = capturedBlob.type === 'image/png' ? 'png' : 'jpg';
     const filename = capturedBlob.name || `bol-${Date.now()}.${ext}`;
     fd.append('bol', capturedBlob, filename);
+    const truckLabel = $('#bol-truck')?.value?.trim();
+    if (truckLabel) fd.append('truckLabel', truckLabel);
     try {
       btnUpload.disabled = true;
       btnUpload.textContent = 'Uploading…';
-      await api('POST', `/api/rfs/orders/${state.selectedOrderId}/bol`, fd, true);
-      toast('Shipped — BOL sent to Logiwa');
-      state.selectedOrderId = null;
+      const r = await api('POST', `/api/rfs/orders/${state.selectedOrderId}/bol`, fd, true);
+      if (r.logiwaError) toast('BOL saved, but Logiwa: ' + r.logiwaError, 'error');
+      else toast(`BOL ${r.bolCount} uploaded`);
+      // Stay on the order — user may want to upload more BOLs or click Mark shipped.
       render();
     } catch (e) {
       toast(e.message, 'error');
@@ -707,6 +791,24 @@ function renderBOLUpload(area, order) {
       btnUpload.textContent = 'Upload BOL';
     }
   };
+
+  // Explicit ship action — separate from BOL upload so an order can collect multiple BOLs first.
+  $('#btn-mark-shipped')?.addEventListener('click', async () => {
+    if (!confirm(`Mark order ${order.logiwaCode} as shipped? It'll disappear from the active list.`)) return;
+    const btn = $('#btn-mark-shipped');
+    try {
+      btn.disabled = true; btn.textContent = 'Shipping…';
+      await api('POST', `/api/rfs/orders/${state.selectedOrderId}/ship`);
+      toast('Order shipped');
+      stopBolStream();
+      state.selectedOrderId = null;
+      render();
+    } catch (e) {
+      toast(e.message, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Mark order shipped';
+    }
+  });
 }
 
 function stopBolStream() {
@@ -1131,7 +1233,9 @@ async function handleUserAction(action, uid, email) {
 const NOTIFY_EVENT_OPTIONS = [
   { v: 'order.staged',       label: 'Order putaway done' },
   { v: 'pallet.loaded',      label: 'Pallet loaded' },
-  { v: 'bol.uploaded',       label: 'BOL uploaded / order shipped' },
+  { v: 'pallet.unloaded',    label: 'Pallet unloaded' },
+  { v: 'bol.uploaded',       label: 'BOL uploaded' },
+  { v: 'order.shipped',      label: 'Order shipped' },
   { v: 'po.arrived',         label: 'PO received' },
   { v: 'po.blind_received',  label: 'Blind receipt (no PO)' },
   { v: 'po.linked',          label: 'Blind receipt linked to PO' },

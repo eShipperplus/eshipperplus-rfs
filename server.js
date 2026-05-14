@@ -566,6 +566,34 @@ app.get('/api/rfs/orders/:id', requireAuth, async (req, res) => {
   res.json({ order: snap.data() });
 });
 
+// Edit the internal note on an order. Intentionally NEVER included in event meta
+// or notification emails — it's a free-text scratchpad for the warehouse team.
+app.put('/api/rfs/orders/:id/note', requireAuth, async (req, res) => {
+  try {
+    const note = (req.body.note ?? '').toString();
+    const ref = db.collection('rfs_orders').doc(req.params.id);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Order not found' });
+    const updates = {
+      internalNote: note || FieldValue.delete(),
+      internalNoteUpdatedAt: note ? Timestamp.now() : FieldValue.delete(),
+      internalNoteUpdatedBy: note ? req.email : FieldValue.delete(),
+    };
+    await ref.update(updates);
+    // Audit-log the change (the note text itself is captured for traceability,
+    // but emails for this event type are intentionally not subscribed by default).
+    await logEvent({
+      type: 'order.note_updated',
+      actor: req.user,
+      subjectType: 'order',
+      subjectId: req.params.id,
+      summary: `${snap.data().logiwaCode}: note ${note ? 'updated' : 'cleared'}`,
+      meta: { orderCode: snap.data().logiwaCode, hasNote: !!note },
+    });
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
 // ─── Putaway ─────────────────────────────────────────────────────────────────
 app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
   try {
@@ -830,20 +858,25 @@ app.post('/api/rfs/orders/:id/unload-pallet', requireAuth, async (req, res) => {
 });
 
 // ─── BOL upload (multipart) ──────────────────────────────────────────────────
+// One order can have many BOLs (multi-truck shipment). Each upload appends to bols[].
+// Upload no longer auto-flips the order to 'shipped' — that's now an explicit action
+// via POST /api/rfs/orders/:id/ship so workers can stage multiple BOLs first.
 app.post('/api/rfs/orders/:id/bol', requireAuth, upload.single('bol'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'BOL file required (field name: bol)' });
+    const truckLabel = (req.body.truckLabel || '').toString().trim() || null;
 
     const orderRef = db.collection('rfs_orders').doc(req.params.id);
     const snap = await orderRef.get();
     if (!snap.exists) return res.status(404).json({ error: 'Order not found' });
     const order = snap.data();
 
-    if (order.rfsState !== 'loaded') {
+    // Allow BOL upload in `loaded` (typical case) or `shipped` (catch-up if a BOL was forgotten).
+    if (!['loaded', 'shipped'].includes(order.rfsState)) {
       return res.status(400).json({ error: `Cannot upload BOL while order is in state "${order.rfsState}". All pallets must be loaded first.` });
     }
 
-    // 1. Save the original photo to Firebase Storage (backup for app-side viewing)
+    // 1. Save the original photo to Firebase Storage
     const ts = Date.now();
     const ext = (req.file.originalname.split('.').pop() || 'jpg').toLowerCase();
     const storagePath = `rfs-bols/${order.logiwaCode}/${ts}.${ext}`;
@@ -851,45 +884,47 @@ app.post('/api/rfs/orders/:id/bol', requireAuth, upload.single('bol'), async (re
     await file.save(req.file.buffer, { contentType: req.file.mimetype, resumable: false });
     const [signedUrl] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000 });
 
-    // 2. Convert to PDF (Logiwa's CarrierLabel slot only accepts PDF) and push as DocumentType=1
-    //    with TrackingNumber=order code.
+    // 2. Convert to PDF and push to Logiwa (best-effort — failure is captured per-BOL)
     let logiwaResult = null;
+    let logiwaError = null;
     try {
       const pdfBuffer = await ensurePdf(req.file.buffer, req.file.mimetype);
       logiwaResult = await logiwa.uploadShipmentDocument({
         shipmentOrderIdentifier: order.logiwaIdentifier,
         shipmentOrderCode: order.logiwaCode,
-        fileName: `BOL_${order.logiwaCode}_${ts}.pdf`,
+        fileName: `BOL_${order.logiwaCode}_${ts}${truckLabel ? '_' + truckLabel.replace(/[^a-zA-Z0-9-]/g, '_') : ''}.pdf`,
         buffer: pdfBuffer,
         mimeType: 'application/pdf',
         trackingNumber: order.logiwaCode,
         documentType: logiwa.DOCUMENT_TYPE_CARRIER_LABEL,
       });
-    } catch (logiwaErr) {
-      // Don't fail the request — store the upload locally and flag it for retry
-      console.error('Logiwa BOL upload failed:', logiwaErr.message);
-      await orderRef.update({
-        bolPhotoUrl: signedUrl,
-        bolStoragePath: storagePath,
-        bolUploadedAt: Timestamp.now(),
-        bolUploadedBy: req.email,
-        logiwaUploadError: logiwaErr.message,
-        logiwaUploadAttemptedAt: Timestamp.now(),
-      });
-      return res.status(502).json({ error: 'BOL saved but Logiwa upload failed', detail: logiwaErr.message, bolPhotoUrl: signedUrl });
+    } catch (e) {
+      logiwaError = e.message;
+      console.error('Logiwa BOL upload failed:', logiwaError);
     }
 
-    // 3. Mark order shipped
+    // 3. Append to bols[] (the source of truth going forward).
+    //    Legacy single-BOL fields (bolPhotoUrl, bolUploadedAt, etc.) are mirrored to the
+    //    LATEST upload so older reports/screens still work without code changes.
+    const newBol = {
+      photoUrl: signedUrl,
+      storagePath,
+      uploadedAt: Timestamp.now(),
+      uploadedBy: req.email,
+      truckLabel,
+      logiwaDocumentResult: logiwaResult,
+      logiwaError: logiwaError || null,
+    };
+    const bols = [...(order.bols || []), newBol];
     await orderRef.update({
+      bols,
+      // Legacy mirrors (latest upload wins)
       bolPhotoUrl: signedUrl,
       bolStoragePath: storagePath,
       bolUploadedAt: Timestamp.now(),
       bolUploadedBy: req.email,
       logiwaDocumentResult: logiwaResult,
-      logiwaUploadError: FieldValue.delete(),
-      rfsState: 'shipped',
-      shippedAt: Timestamp.now(),
-      shippedBy: req.email,
+      logiwaUploadError: logiwaError || FieldValue.delete(),
     });
 
     await logEvent({
@@ -897,18 +932,56 @@ app.post('/api/rfs/orders/:id/bol', requireAuth, upload.single('bol'), async (re
       actor: req.user,
       subjectType: 'order',
       subjectId: req.params.id,
-      summary: `${order.logiwaCode}: BOL uploaded → shipped`,
+      summary: `${order.logiwaCode}: BOL #${bols.length} uploaded${truckLabel ? ' (' + truckLabel + ')' : ''}${logiwaError ? ' — Logiwa sync issue' : ''}`,
       meta: {
         orderCode: order.logiwaCode,
         clientName: order.clientName,
-        storagePath,
-        logiwaDocumentResult: logiwaResult,
+        truckLabel,
+        bolCount: bols.length,
+        logiwaError,
       },
     });
 
-    res.json({ ok: true, bolPhotoUrl: signedUrl, logiwaDocumentResult: logiwaResult });
+    res.json({ ok: true, bolPhotoUrl: signedUrl, bolCount: bols.length, logiwaError });
   } catch (err) {
     console.error('bol upload error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Explicit "ship the order" action — flips rfsState to shipped. Worker triggers this
+// after all the BOLs they need are uploaded. Decoupling lets one order accept many BOLs
+// across multiple trucks before being closed out.
+app.post('/api/rfs/orders/:id/ship', requireAuth, async (req, res) => {
+  try {
+    const ref = db.collection('rfs_orders').doc(req.params.id);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Order not found' });
+    const order = snap.data();
+    if (order.rfsState === 'shipped') return res.json({ ok: true, alreadyShipped: true });
+    if (order.rfsState !== 'loaded') {
+      return res.status(400).json({ error: `Cannot ship order in state "${order.rfsState}". All pallets must be loaded first.` });
+    }
+    await ref.update({
+      rfsState: 'shipped',
+      shippedAt: Timestamp.now(),
+      shippedBy: req.email,
+    });
+    await logEvent({
+      type: 'order.shipped',
+      actor: req.user,
+      subjectType: 'order',
+      subjectId: req.params.id,
+      summary: `${order.logiwaCode}: shipped with ${(order.bols || []).length} BOL${(order.bols || []).length === 1 ? '' : 's'}`,
+      meta: {
+        orderCode: order.logiwaCode,
+        clientName: order.clientName,
+        bolCount: (order.bols || []).length,
+      },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('ship order error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1520,7 +1593,7 @@ app.get('/api/rfs/admin/pos', requireAuth, requireRole(...REPORT_ROLES), async (
 });
 
 // ─── Notification rules (admin) ──────────────────────────────────────────────
-const NOTIFY_EVENTS = ['order.staged', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
+const NOTIFY_EVENTS = ['order.staged', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
 const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight'];
 
 app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
