@@ -359,9 +359,13 @@ async function renderOrderDetail() {
         const dims = (p.length || p.width || p.height || p.weight)
           ? `${p.length || '—'} × ${p.width || '—'} × ${p.height || '—'} ${escape(p.dimensionUnit || 'in')} · ${p.weight || '—'} ${escape(p.weightUnit || 'lb')}`
           : '<span style="color:#999">No dims/weight recorded</span>';
+        const idLine = p.palletId
+          ? `<div class="hint"><strong>ID:</strong> <span style="font-family:ui-monospace,monospace">${escape(p.palletId)}</span></div>`
+          : '';
         return `
           <div class="pallet-row">
             <div class="row"><span class="palletNo">P${p.palletNo}</span><span class="loc grow">${escape(p.locationCode || '— never placed —')}</span></div>
+            ${idLine}
             <div class="hint" style="margin-top:4px">${dims}</div>
             <div class="hint">Putaway: ${fmtTs(p.stagedAt)} ${p.stagedBy ? '· ' + escape(p.stagedBy) : ''}</div>
             ${p.loadedAt ? `<div class="hint">Loaded: ${fmtTs(p.loadedAt)} ${p.loadedBy ? '· ' + escape(p.loadedBy) : ''}</div>` : ''}
@@ -480,8 +484,13 @@ function addPalletRow(rows, palletNo, existing) {
     <div class="pallet-row" data-row="${palletNo}">
       <div class="row" style="margin-bottom:6px">
         <span class="palletNo">P${palletNo}</span>
+        <input type="text" class="grow" placeholder="Pallet ID (RFS-…)" value="${escape(existing?.palletId || '')}" data-pallet="${palletNo}" data-field="palletId" />
+        <button class="btn secondary" data-scan-pid="${palletNo}" style="padding:8px 12px;min-height:0">Scan</button>
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <span class="palletNo" style="visibility:hidden">P${palletNo}</span>
         <input type="text" class="grow" list="loc-options" placeholder="Scan or type location code" value="${escape(existing?.locationCode || '')}" data-pallet="${palletNo}" data-field="locationCode" />
-        <button class="btn secondary" data-scan="${palletNo}" style="padding:8px 12px;min-height:0">Scan</button>
+        <button class="btn secondary" data-scan-loc="${palletNo}" style="padding:8px 12px;min-height:0">Scan</button>
       </div>
       <div class="row" style="gap:6px">
         <input type="number" inputmode="decimal" class="grow" placeholder="L" step="0.1" value="${existing?.length ?? ''}" data-pallet="${palletNo}" data-field="length" style="padding:8px;min-width:0" />
@@ -490,15 +499,19 @@ function addPalletRow(rows, palletNo, existing) {
         <input type="number" inputmode="decimal" class="grow" placeholder="Wt" step="0.1" value="${existing?.weight ?? ''}" data-pallet="${palletNo}" data-field="weight" style="padding:8px;min-width:0" />
       </div>
       <div class="row" style="margin-top:4px;align-items:center;gap:8px">
-        <span class="hint grow">Dims in <strong>${existing?.dimensionUnit || 'in'}</strong> · Weight in <strong>${existing?.weightUnit || 'lb'}</strong>${existing?.state === 'loaded' ? ' · <span style="color:#1f6b1f">loaded</span>' : (existing?.state === 'staged' ? ' · <span style="color:#0d3b66">staged</span>' : '')}</span>
+        <span class="hint grow">Pallet ID must start with <strong>RFS</strong> · Dims in <strong>${existing?.dimensionUnit || 'in'}</strong> · Weight in <strong>${existing?.weightUnit || 'lb'}</strong>${existing?.state === 'loaded' ? ' · <span style="color:#1f6b1f">loaded</span>' : (existing?.state === 'staged' ? ' · <span style="color:#0d3b66">staged</span>' : '')}</span>
         ${helperBtn}
       </div>
     </div>
   `);
   rows.appendChild(row);
 
-  row.querySelector('button[data-scan]').onclick = () => openScanner((code) => {
+  row.querySelector('button[data-scan-loc]').onclick = () => openScanner((code) => {
     const inp = row.querySelector('input[data-field="locationCode"]');
+    if (inp) inp.value = code.trim();
+  });
+  row.querySelector('button[data-scan-pid]').onclick = () => openScanner((code) => {
+    const inp = row.querySelector('input[data-field="palletId"]');
     if (inp) inp.value = code.trim();
   });
 
@@ -546,8 +559,14 @@ async function savePutaway(rows) {
   for (const r of palletEls) {
     const palletNo = parseInt(r.dataset.row, 10);
     const get = (f) => r.querySelector(`input[data-field="${f}"]`)?.value?.trim() || '';
+    const palletId = get('palletId');
+    if (palletId && !/^rfs/i.test(palletId)) {
+      toast(`Pallet ${palletNo} ID "${palletId}" must start with RFS`, 'error');
+      return;
+    }
     pallets.push({
       palletNo,
+      palletId,
       locationCode: get('locationCode'),
       length: get('length'),
       width: get('width'),
@@ -595,6 +614,9 @@ function renderLoadingArea(area, order) {
     } else {
       action = '<span class="badge awaiting">pending</span>';
     }
+    const idLine = p.palletId
+      ? `<div class="hint" style="margin-top:2px"><strong>ID:</strong> <span style="font-family:ui-monospace,monospace">${escape(p.palletId)}</span></div>`
+      : '';
     const r = el(`
       <div class="pallet-row">
         <div class="row">
@@ -602,6 +624,7 @@ function renderLoadingArea(area, order) {
           <span class="loc grow">${escape(p.locationCode || '— not yet placed —')}${p.state === 'loaded' ? ' <span class="badge loaded" style="margin-left:6px">loaded</span>' : ''}</span>
           ${action}
         </div>
+        ${idLine}
         ${dimsLine}
       </div>
     `);
@@ -1231,21 +1254,23 @@ async function handleUserAction(action, uid, email) {
 
 // ─── Notifications sub-tab ───────────────────────────────────────────────────
 const NOTIFY_EVENT_OPTIONS = [
-  { v: 'order.staged',       label: 'Order putaway done (first time)' },
-  { v: 'order.updated',      label: 'Order putaway edited (after staging)' },
-  { v: 'pallet.loaded',      label: 'Pallet loaded' },
-  { v: 'pallet.unloaded',    label: 'Pallet unloaded' },
-  { v: 'bol.uploaded',       label: 'BOL uploaded' },
-  { v: 'order.shipped',      label: 'Order shipped' },
-  { v: 'po.arrived',         label: 'PO received' },
-  { v: 'po.blind_received',  label: 'Blind receipt (no PO)' },
-  { v: 'po.linked',          label: 'Blind receipt linked to PO' },
-  { v: 'sync.run',           label: 'Logiwa sync ran' },
+  { v: 'order.staged',         label: 'Order putaway done (first time)' },
+  { v: 'order.dims_complete',  label: 'Order has all dims + weight ★ recommended' },
+  { v: 'order.updated',        label: 'Order putaway edited (after staging)' },
+  { v: 'pallet.loaded',        label: 'Pallet loaded' },
+  { v: 'pallet.unloaded',      label: 'Pallet unloaded' },
+  { v: 'bol.uploaded',         label: 'BOL uploaded' },
+  { v: 'order.shipped',        label: 'Order shipped' },
+  { v: 'po.arrived',           label: 'PO received' },
+  { v: 'po.blind_received',    label: 'Blind receipt (no PO)' },
+  { v: 'po.linked',            label: 'Blind receipt linked to PO' },
+  { v: 'sync.run',             label: 'Logiwa sync ran' },
 ];
 const NOTIFY_CONDITION_OPTIONS = [
-  { v: 'always',     label: 'Every time' },
-  { v: 'has_dims',   label: 'Only if dims captured' },
-  { v: 'has_weight', label: 'Only if weight captured' },
+  { v: 'always',                   label: 'Every time' },
+  { v: 'has_dims',                 label: 'Only if any dims captured' },
+  { v: 'has_weight',               label: 'Only if any weight captured' },
+  { v: 'all_dims_weight_complete', label: 'Only if ALL pallets have full dims + weight' },
 ];
 
 let _notifyRules = [];
@@ -1944,7 +1969,8 @@ function renderAdminHistoryTable() {
                 ? pallets.map(p => {
                     const d = (p.length || p.width || p.height) ? `${p.length || '—'}×${p.width || '—'}×${p.height || '—'} ${escape(p.dimensionUnit || 'in')}` : '';
                     const w = p.weight ? `${p.weight} ${escape(p.weightUnit || 'lb')}` : '';
-                    return `P${p.palletNo}${p.locationCode ? ' @ ' + escape(p.locationCode) : ''}${d ? ' · ' + d : ''}${w ? ' · ' + w : ''}`;
+                    const id = p.palletId ? ` [${escape(p.palletId)}]` : '';
+                    return `P${p.palletNo}${id}${p.locationCode ? ' @ ' + escape(p.locationCode) : ''}${d ? ' · ' + d : ''}${w ? ' · ' + w : ''}`;
                   }).join('  |  ')
                 : '';
               const wait = computeWait(o);
@@ -1981,20 +2007,20 @@ function renderAdminHistoryTable() {
 function exportHistoryCSV() {
   if (!_adminOrders.length) { toast('No data to export', 'error'); return; }
   // One row per pallet, so CSM can pivot on dims/weight
-  const rows = [['Order', 'Type', 'Client', 'Customer', 'State', 'Pallet#', 'Location', 'L', 'W', 'H', 'Dim unit', 'Weight', 'Weight unit', 'Pallet state', 'Staged at', 'Staged by', 'Loaded at', 'Loaded by', 'Wait', 'Wait minutes', 'BOL uploaded', 'BOL by', 'Shipped at']];
+  const rows = [['Order', 'Type', 'Client', 'Customer', 'State', 'Pallet#', 'Pallet ID', 'Location', 'L', 'W', 'H', 'Dim unit', 'Weight', 'Weight unit', 'Pallet state', 'Staged at', 'Staged by', 'Loaded at', 'Loaded by', 'Wait', 'Wait minutes', 'BOL uploaded', 'BOL by', 'Shipped at']];
   for (const o of _adminOrders) {
     const wait = computeWait(o);
     const waitText = wait ? `${fmtDuration(wait.ms)}${wait.ongoing ? ' (sitting)' : ''}` : '';
     const waitMinutes = wait ? Math.round(wait.ms / 60000) : '';
     const pallets = o.pallets || [];
     if (!pallets.length) {
-      rows.push([o.logiwaCode, o.shipmentOrderTypeName, o.clientName, o.customerName, o.rfsState, '', '', '', '', '', '', '', '', '', '', '', '', '', waitText, waitMinutes, fmtTs(o.bolUploadedAt), o.bolUploadedBy || '', fmtTs(o.shippedAt)]);
+      rows.push([o.logiwaCode, o.shipmentOrderTypeName, o.clientName, o.customerName, o.rfsState, '', '', '', '', '', '', '', '', '', '', '', '', '', '', waitText, waitMinutes, fmtTs(o.bolUploadedAt), o.bolUploadedBy || '', fmtTs(o.shippedAt)]);
       continue;
     }
     for (const p of pallets) {
       rows.push([
         o.logiwaCode, o.shipmentOrderTypeName, o.clientName, o.customerName, o.rfsState,
-        p.palletNo, p.locationCode || '',
+        p.palletNo, p.palletId || '', p.locationCode || '',
         p.length ?? '', p.width ?? '', p.height ?? '', p.dimensionUnit || '',
         p.weight ?? '', p.weightUnit || '',
         p.state || '',

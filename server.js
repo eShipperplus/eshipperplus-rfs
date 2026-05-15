@@ -191,6 +191,16 @@ async function dispatchNotifications(event) {
         const pallets = event.meta?.pallets || [];
         const anyWt = pallets.some(p => p.weight);
         if (!anyWt) continue;
+      } else if (rule.condition === 'all_dims_weight_complete') {
+        // Fire only when EVERY pallet has L, W, H, AND weight all populated and > 0.
+        // Used for putaway-done emails that are useless without the dim/weight data
+        // CSM needs to schedule pickups.
+        const pallets = event.meta?.pallets || [];
+        if (!pallets.length) continue;
+        const allComplete = pallets.every(p =>
+          Number(p.length) > 0 && Number(p.width) > 0 && Number(p.height) > 0 && Number(p.weight) > 0
+        );
+        if (!allComplete) continue;
       }
 
       const recipients = (rule.recipients || []).filter(Boolean);
@@ -211,7 +221,8 @@ function esc(s) {
 function renderEmailSubject(event) {
   const m = event.meta || {};
   switch (event.type) {
-    case 'order.staged': {
+    case 'order.staged':
+    case 'order.dims_complete': {
       const who = m.companyName || m.customerName ||
         [m.customerFirstName, m.customerLastName].filter(Boolean).join(' ') ||
         m.clientName || '';
@@ -225,7 +236,7 @@ function renderEmailSubject(event) {
 }
 
 function renderEmailBody(event) {
-  if (event.type === 'order.staged') return renderOrderStagedBody(event);
+  if (event.type === 'order.staged' || event.type === 'order.dims_complete') return renderOrderStagedBody(event);
   // Generic table body for everything else (BOL upload, PO arrive, etc.)
   const m = event.meta || {};
   const palletList = (m.pallets || []).map(p => {
@@ -263,7 +274,8 @@ function renderOrderStagedBody(event) {
       ? `${dimsParts[0]}×${dimsParts[1]}×${dimsParts[2]} ${esc(p.dimensionUnit || 'in')}`
       : 'dims not recorded';
     const wt = p.weight ? `${p.weight} ${esc(p.weightUnit || 'lb')}` : 'weight not recorded';
-    return `<li style="margin-bottom:4px"><strong>P${p.palletNo}</strong>: ${dims} · ${wt}</li>`;
+    const idTag = p.palletId ? ` <span style="color:#666;font-weight:400">[${esc(p.palletId)}]</span>` : '';
+    return `<li style="margin-bottom:4px"><strong>P${p.palletNo}</strong>${idTag}: ${dims} · ${wt}</li>`;
   }).join('');
 
   // Build address rows only for fields that are populated, keep CSM-friendly labels.
@@ -312,6 +324,21 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Pallet ID is a worker-supplied label printed on the physical pallet (or scanned
+// from a barcode). We require the "RFS" prefix so it's recognisable on the floor;
+// blank is also fine (palletId is optional). Case-insensitive prefix check.
+function normalizePalletId(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  if (!/^rfs/i.test(s)) {
+    const err = new Error(`Pallet ID "${s}" must start with "RFS"`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return s;
+}
+
 // Build a pallet record from incoming partial data, merging with the previous
 // pallet (if any) so timestamps + units that were already set are preserved.
 function mergePallet(palletNo, input, prev, by) {
@@ -324,8 +351,16 @@ function mergePallet(palletNo, input, prev, by) {
   const height = num(input.height) ?? prev?.height ?? null;
   const weight = num(input.weight) ?? prev?.weight ?? null;
 
+  // palletId: if the input includes the field, use that (after RFS-prefix validation);
+  // otherwise keep what was previously stored. Lets workers update the id later.
+  let palletId = prev?.palletId ?? null;
+  if (Object.prototype.hasOwnProperty.call(input, 'palletId')) {
+    palletId = normalizePalletId(input.palletId);
+  }
+
   return {
     palletNo,
+    palletId,
     locationCode,
     length,
     width,
@@ -686,7 +721,7 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
     // Re-read the order to grab the canonical pallet info for the audit summary
     const fresh = (await db.collection('rfs_orders').doc(req.params.id).get()).data();
     const summary = (fresh.pallets || [])
-      .map(p => `P${p.palletNo}${p.locationCode ? ' @ ' + p.locationCode : ' (pending)'}${p.weight ? ' ' + p.weight + (p.weightUnit||'lb') : ''}`)
+      .map(p => `P${p.palletNo}${p.palletId ? ' [' + p.palletId + ']' : ''}${p.locationCode ? ' @ ' + p.locationCode : ' (pending)'}${p.weight ? ' ' + p.weight + (p.weightUnit||'lb') : ''}`)
       .join(' | ');
     // Fire `order.staged` ONLY when the order actually transitions from awaiting_putaway → staged.
     // Subsequent edits (re-saving an already-staged order) log as `order.updated` so audit history
@@ -716,6 +751,45 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
         pallets: fresh.pallets,
       },
     });
+
+    // Detect the "all pallets have full dims + weight" milestone. This fires exactly
+    // once per order — whether the worker entered all the data upfront (initial stage)
+    // or filled it in later via edits. Subscribe `order.dims_complete` rules to this.
+    const allComplete = (fresh.pallets || []).length > 0 && (fresh.pallets || []).every(p =>
+      Number(p.length) > 0 && Number(p.width) > 0 && Number(p.height) > 0 && Number(p.weight) > 0
+    );
+    if (allComplete && !fresh.dimsCompleteAt) {
+      await db.collection('rfs_orders').doc(req.params.id).update({
+        dimsCompleteAt: Timestamp.now(),
+        dimsCompleteBy: req.email,
+      });
+      await logEvent({
+        type: 'order.dims_complete',
+        actor: req.user,
+        subjectType: 'order',
+        subjectId: req.params.id,
+        summary: `${fresh.logiwaCode}: all pallets have full dims + weight`,
+        // Include the same fields as order.staged so the same email template renders cleanly.
+        meta: {
+          orderCode: fresh.logiwaCode,
+          clientName: fresh.clientName,
+          customerName: fresh.customerName,
+          customerFirstName: fresh.customerFirstName,
+          customerLastName: fresh.customerLastName,
+          customerEmail: fresh.customerEmail,
+          companyName: fresh.companyName,
+          shipmentAddressLine1: fresh.shipmentAddressLine1,
+          shipmentAddressLine2: fresh.shipmentAddressLine2,
+          shipmentCity: fresh.shipmentCity,
+          shipmentPostalCode: fresh.shipmentPostalCode,
+          shipmentStateOrRegionName: fresh.shipmentStateOrRegionName,
+          shipmentCountryCode: fresh.shipmentCountryCode,
+          shipmentPhoneNumber: fresh.shipmentPhoneNumber,
+          rfsState: fresh.rfsState,
+          pallets: fresh.pallets,
+        },
+      });
+    }
 
     res.json({ ok: true });
   } catch (err) {
@@ -1605,8 +1679,8 @@ app.get('/api/rfs/admin/pos', requireAuth, requireRole(...REPORT_ROLES), async (
 });
 
 // ─── Notification rules (admin) ──────────────────────────────────────────────
-const NOTIFY_EVENTS = ['order.staged', 'order.updated', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
-const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight'];
+const NOTIFY_EVENTS = ['order.staged', 'order.dims_complete', 'order.updated', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
+const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight', 'all_dims_weight_complete'];
 
 app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
   try {
