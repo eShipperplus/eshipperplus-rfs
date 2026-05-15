@@ -1231,7 +1231,8 @@ async function handleUserAction(action, uid, email) {
 
 // ─── Notifications sub-tab ───────────────────────────────────────────────────
 const NOTIFY_EVENT_OPTIONS = [
-  { v: 'order.staged',       label: 'Order putaway done' },
+  { v: 'order.staged',       label: 'Order putaway done (first time)' },
+  { v: 'order.updated',      label: 'Order putaway edited (after staging)' },
   { v: 'pallet.loaded',      label: 'Pallet loaded' },
   { v: 'pallet.unloaded',    label: 'Pallet unloaded' },
   { v: 'bol.uploaded',       label: 'BOL uploaded' },
@@ -1249,34 +1250,41 @@ const NOTIFY_CONDITION_OPTIONS = [
 
 let _notifyRules = [];
 
+let _allClients = [];
+
 async function renderNotificationsSection(host) {
   host.innerHTML = `
     <div class="card">
-      <h3>Notification rules</h3>
-      <div class="meta" style="margin-bottom:8px">When an event fires, every matching rule sends an email. Add a rule per client + event combo. Requires SMTP_USER + SMTP_PASS env vars to be configured on the server.</div>
+      <h3>Add a rule</h3>
+      <div class="meta" style="margin-bottom:8px">When the chosen event fires, an email goes to every recipient. Pick one or more clients (blank = all clients). Requires SMTP_USER + SMTP_PASS env vars to be configured on the server.</div>
 
       <div class="filter-grid" style="margin-bottom:8px">
         <select id="nr-event">
           ${NOTIFY_EVENT_OPTIONS.map(o => `<option value="${o.v}">${escape(o.label)}</option>`).join('')}
         </select>
-        <input type="text" id="nr-client" list="nr-client-list" placeholder="Client (blank = all clients)" />
-        <datalist id="nr-client-list"></datalist>
+        <select id="nr-clients" multiple size="5" title="Hold Ctrl/Cmd to select multiple. Empty = all clients."></select>
         <select id="nr-condition">
           ${NOTIFY_CONDITION_OPTIONS.map(o => `<option value="${o.v}">${escape(o.label)}</option>`).join('')}
         </select>
         <input type="text" id="nr-recipients" placeholder="Recipients — comma-separated emails" />
         <button class="btn" id="nr-add">Add rule</button>
       </div>
+      <div class="hint" style="margin-top:-4px">Tip: Ctrl-click (Cmd-click on Mac) clients in the dropdown to pick multiple. Select none for "all clients".</div>
+    </div>
 
+    <div class="card">
+      <h3>Existing rules</h3>
       <div id="nr-list"><div class="loader">Loading…</div></div>
     </div>
   `;
 
-  // Populate client autocomplete from order + PO data
-  api('GET', '/api/rfs/clients').then(({ clients }) => {
-    const dl = $('#nr-client-list');
-    if (dl && Array.isArray(clients)) dl.innerHTML = clients.map(c => `<option value="${escape(c)}"></option>`).join('');
-  }).catch(() => {});
+  // Populate client picker from the same /clients endpoint used elsewhere
+  try {
+    const { clients } = await api('GET', '/api/rfs/clients');
+    _allClients = Array.isArray(clients) ? clients : [];
+  } catch { _allClients = []; }
+  const sel = $('#nr-clients');
+  if (sel) sel.innerHTML = _allClients.map(c => `<option value="${escape(c)}">${escape(c)}</option>`).join('');
 
   $('#nr-add').onclick = saveNotificationRule;
   await loadNotificationRules();
@@ -1284,15 +1292,15 @@ async function renderNotificationsSection(host) {
 
 async function saveNotificationRule() {
   const event = $('#nr-event').value;
-  const clientName = $('#nr-client').value.trim() || null;
+  const clientNames = Array.from($('#nr-clients').selectedOptions).map(o => o.value);
   const condition = $('#nr-condition').value;
   const recipients = $('#nr-recipients').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!recipients.length) { toast('Enter at least one recipient email', 'error'); return; }
   try {
     $('#nr-add').disabled = true;
-    await api('POST', '/api/rfs/admin/notification-rules', { event, clientName, condition, recipients, enabled: true });
+    await api('POST', '/api/rfs/admin/notification-rules', { event, clientNames, condition, recipients, enabled: true });
     toast('Rule added');
-    $('#nr-client').value = '';
+    Array.from($('#nr-clients').options).forEach(o => o.selected = false);
     $('#nr-recipients').value = '';
     await loadNotificationRules();
   } catch (e) { toast(e.message, 'error'); }
@@ -1312,7 +1320,7 @@ async function loadNotificationRules() {
           <thead>
             <tr style="text-align:left;background:#f7f9fb">
               <th style="padding:8px">Event</th>
-              <th style="padding:8px">Client</th>
+              <th style="padding:8px">Clients</th>
               <th style="padding:8px">Condition</th>
               <th style="padding:8px">Recipients</th>
               <th style="padding:8px">Status</th>
@@ -1323,14 +1331,21 @@ async function loadNotificationRules() {
             ${rules.map(r => {
               const evtLabel = NOTIFY_EVENT_OPTIONS.find(o => o.v === r.event)?.label || r.event;
               const condLabel = NOTIFY_CONDITION_OPTIONS.find(o => o.v === r.condition)?.label || r.condition;
+              const clientList = Array.isArray(r.clientNames) && r.clientNames.length
+                ? r.clientNames
+                : (r.clientName ? [r.clientName] : []);
+              const clientsCell = clientList.length
+                ? clientList.map(c => `<div>${escape(c)}</div>`).join('')
+                : '<span class="hint">All clients</span>';
               return `
                 <tr style="border-top:1px solid #e8eaed">
                   <td style="padding:8px"><strong>${escape(evtLabel)}</strong><br><span class="hint">${escape(r.event)}</span></td>
-                  <td style="padding:8px">${escape(r.clientName || 'All clients')}</td>
+                  <td style="padding:8px">${clientsCell}</td>
                   <td style="padding:8px">${escape(condLabel)}</td>
                   <td style="padding:8px">${(r.recipients || []).map(e => `<div>${escape(e)}</div>`).join('')}</td>
                   <td style="padding:8px">${r.enabled ? '<span class="badge loaded">enabled</span>' : '<span class="badge" style="background:#eee;color:#888">disabled</span>'}</td>
-                  <td style="padding:8px">
+                  <td style="padding:8px;white-space:nowrap">
+                    <button class="btn secondary" data-nr-action="edit" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">Edit</button>
                     <button class="btn secondary" data-nr-action="toggle" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">${r.enabled ? 'Disable' : 'Enable'}</button>
                     <button class="btn secondary" data-nr-action="test" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">Test</button>
                     <button class="btn danger" data-nr-action="delete" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">Delete</button>
@@ -1352,6 +1367,10 @@ async function handleNotifyRuleAction(action, id) {
   const rule = _notifyRules.find(r => r.id === id);
   if (!rule) return;
   try {
+    if (action === 'edit') {
+      openNotifyRuleEditModal(rule);
+      return;
+    }
     if (action === 'toggle') {
       await api('PUT', `/api/rfs/admin/notification-rules/${id}`, { enabled: !rule.enabled });
       toast(rule.enabled ? 'Disabled' : 'Enabled');
@@ -1367,6 +1386,68 @@ async function handleNotifyRuleAction(action, id) {
     }
     await loadNotificationRules();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+function openNotifyRuleEditModal(rule) {
+  const existing = document.getElementById('nr-edit-modal');
+  if (existing) existing.remove();
+  const currentClients = Array.isArray(rule.clientNames) && rule.clientNames.length
+    ? rule.clientNames
+    : (rule.clientName ? [rule.clientName] : []);
+  // Union of known clients + any client on the rule that's not in the current list
+  const allOptions = [...new Set([..._allClients, ...currentClients])].sort();
+
+  const modal = el(`
+    <div id="nr-edit-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:200;padding:16px">
+      <div class="card" style="max-width:560px;width:100%;max-height:90vh;overflow-y:auto;margin:0">
+        <div class="row" style="margin-bottom:8px">
+          <h3 class="grow" style="margin:0">Edit notification rule</h3>
+          <button id="nr-edit-close" style="background:none;border:none;font-size:24px;cursor:pointer;color:#888">×</button>
+        </div>
+        <label>Event</label>
+        <select id="nre-event">
+          ${NOTIFY_EVENT_OPTIONS.map(o => `<option value="${o.v}"${rule.event === o.v ? ' selected' : ''}>${escape(o.label)}</option>`).join('')}
+        </select>
+        <label>Clients <span class="hint" style="font-weight:400">— select 0 for "all clients", or one or many</span></label>
+        <select id="nre-clients" multiple size="8" style="height:auto">
+          ${allOptions.map(c => `<option value="${escape(c)}"${currentClients.includes(c) ? ' selected' : ''}>${escape(c)}</option>`).join('')}
+        </select>
+        <label>Condition</label>
+        <select id="nre-condition">
+          ${NOTIFY_CONDITION_OPTIONS.map(o => `<option value="${o.v}"${rule.condition === o.v ? ' selected' : ''}>${escape(o.label)}</option>`).join('')}
+        </select>
+        <label>Recipients <span class="hint" style="font-weight:400">— comma-separated emails</span></label>
+        <input type="text" id="nre-recipients" value="${escape((rule.recipients || []).join(', '))}" />
+        <div class="row" style="margin-top:12px;align-items:center">
+          <label class="grow" style="margin:0;display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="nre-enabled"${rule.enabled ? ' checked' : ''} /> Enabled
+          </label>
+          <button class="btn" id="nre-save">Save changes</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  $('#nr-edit-close').onclick = close;
+  modal.onclick = (e) => { if (e.target === modal) close(); };
+
+  $('#nre-save').onclick = async () => {
+    const event = $('#nre-event').value;
+    const clientNames = Array.from($('#nre-clients').selectedOptions).map(o => o.value);
+    const condition = $('#nre-condition').value;
+    const recipients = $('#nre-recipients').value.split(',').map(s => s.trim()).filter(Boolean);
+    const enabled = $('#nre-enabled').checked;
+    if (!recipients.length) { toast('At least one recipient email required', 'error'); return; }
+    try {
+      $('#nre-save').disabled = true;
+      await api('PUT', `/api/rfs/admin/notification-rules/${rule.id}`, { event, clientNames, condition, recipients, enabled });
+      toast('Rule updated');
+      close();
+      await loadNotificationRules();
+    } catch (e) { toast(e.message, 'error'); $('#nre-save').disabled = false; }
+  };
 }
 
 function tsToMs(t) {

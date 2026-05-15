@@ -176,8 +176,12 @@ async function dispatchNotifications(event) {
 
     for (const ruleDoc of rulesSnap.docs) {
       const rule = ruleDoc.data();
-      // Client filter (null = all clients)
-      if (rule.clientName && rule.clientName !== '*' && event.meta?.clientName !== rule.clientName) continue;
+      // Client filter — supports new `clientNames[]` array and legacy single `clientName` string.
+      // Empty list = all clients.
+      const clientList = Array.isArray(rule.clientNames) && rule.clientNames.length
+        ? rule.clientNames
+        : (rule.clientName && rule.clientName !== '*' ? [rule.clientName] : []);
+      if (clientList.length > 0 && !clientList.includes(event.meta?.clientName)) continue;
       // Condition gating
       if (rule.condition === 'has_dims') {
         const pallets = event.meta?.pallets || [];
@@ -602,6 +606,10 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'pallets array required' });
     }
 
+    // Captures whether the order transitioned awaiting_putaway → staged in this save.
+    // The notification event type depends on this — see logEvent call below.
+    const txResult = { didStageTransition: false };
+
     await db.runTransaction(async (tx) => {
       const orderRef = db.collection('rfs_orders').doc(req.params.id);
       const orderSnap = await tx.get(orderRef);
@@ -667,6 +675,7 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
         updates.rfsState = 'staged';
         updates.stagedAt = Timestamp.now();
         updates.stagedBy = req.email;
+        txResult.didStageTransition = true;
       } else if (!allStaged && order.rfsState === 'staged') {
         // Partial save after a previously fully-staged order — revert to awaiting_putaway
         updates.rfsState = 'awaiting_putaway';
@@ -679,8 +688,11 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
     const summary = (fresh.pallets || [])
       .map(p => `P${p.palletNo}${p.locationCode ? ' @ ' + p.locationCode : ' (pending)'}${p.weight ? ' ' + p.weight + (p.weightUnit||'lb') : ''}`)
       .join(' | ');
+    // Fire `order.staged` ONLY when the order actually transitions from awaiting_putaway → staged.
+    // Subsequent edits (re-saving an already-staged order) log as `order.updated` so audit history
+    // is preserved but notification rules don't re-fire emails every time.
     await logEvent({
-      type: 'order.staged',
+      type: txResult.didStageTransition ? 'order.staged' : 'order.updated',
       actor: req.user,
       subjectType: 'order',
       subjectId: req.params.id,
@@ -1593,7 +1605,7 @@ app.get('/api/rfs/admin/pos', requireAuth, requireRole(...REPORT_ROLES), async (
 });
 
 // ─── Notification rules (admin) ──────────────────────────────────────────────
-const NOTIFY_EVENTS = ['order.staged', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
+const NOTIFY_EVENTS = ['order.staged', 'order.updated', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
 const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight'];
 
 app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
@@ -1603,24 +1615,37 @@ app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Normalize the multi-client input. Accepts an array `clientNames` or a legacy single string `clientName`.
+// Returns a clean string[] (empty = all clients).
+function normalizeClientList(body) {
+  if (Array.isArray(body.clientNames)) {
+    return [...new Set(body.clientNames.map(s => String(s).trim()).filter(Boolean))];
+  }
+  if (body.clientName) return [String(body.clientName).trim()].filter(Boolean);
+  return [];
+}
+
 app.post('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const { event, clientName, recipients, condition, enabled } = req.body;
+    const { event, recipients, condition, enabled } = req.body;
     if (!NOTIFY_EVENTS.includes(event)) return res.status(400).json({ error: `event must be one of: ${NOTIFY_EVENTS.join(', ')}` });
     const cond = condition || 'always';
     if (!NOTIFY_CONDITIONS.includes(cond)) return res.status(400).json({ error: `condition must be one of: ${NOTIFY_CONDITIONS.join(', ')}` });
     const recip = Array.isArray(recipients) ? recipients.map(s => String(s).trim()).filter(Boolean) : [];
     if (!recip.length) return res.status(400).json({ error: 'At least one recipient email required' });
+    const clientNames = normalizeClientList(req.body);
     const ref = await db.collection('rfs_notification_rules').add({
       event,
-      clientName: clientName || null,
+      clientNames,           // new multi-client array (empty = all clients)
+      clientName: clientNames.length === 1 ? clientNames[0] : null, // legacy mirror, kept for older clients
       recipients: recip,
       condition: cond,
       enabled: enabled !== false,
       createdAt: Timestamp.now(),
       createdBy: req.email,
     });
-    await logEvent({ type: 'notification_rule.created', actor: req.user, subjectType: 'rule', subjectId: ref.id, summary: `${event}${clientName ? ' · ' + clientName : ''} → ${recip.length} recipient(s)` });
+    const clientSummary = clientNames.length ? clientNames.join(', ') : 'all clients';
+    await logEvent({ type: 'notification_rule.created', actor: req.user, subjectType: 'rule', subjectId: ref.id, summary: `${event} · ${clientSummary} → ${recip.length} recipient(s)` });
     res.json({ ok: true, id: ref.id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -1632,7 +1657,12 @@ app.put('/api/rfs/admin/notification-rules/:id', requireAuth, requireRole('admin
       if (!NOTIFY_EVENTS.includes(req.body.event)) return res.status(400).json({ error: 'Bad event' });
       updates.event = req.body.event;
     }
-    if (req.body.clientName !== undefined) updates.clientName = req.body.clientName || null;
+    // Accept clientNames (preferred) or clientName (legacy)
+    if (req.body.clientNames !== undefined || req.body.clientName !== undefined) {
+      const list = normalizeClientList(req.body);
+      updates.clientNames = list;
+      updates.clientName = list.length === 1 ? list[0] : null;
+    }
     if (req.body.recipients !== undefined) {
       const recip = Array.isArray(req.body.recipients) ? req.body.recipients.map(s => String(s).trim()).filter(Boolean) : [];
       if (!recip.length) return res.status(400).json({ error: 'At least one recipient required' });
