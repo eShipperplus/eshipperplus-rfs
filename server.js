@@ -493,9 +493,15 @@ async function runSync(actor) {
   // Archive any active orders that Logiwa did NOT return — they're no longer Ready to Ship
   // (most likely shipped manually in Logiwa). They won't appear in the active list anymore,
   // but stay in the admin history with state `archived_externally`.
-  // Note: we use a single-field where + in-memory filter (no composite index required).
+  //
+  // Some clients flip the Logiwa status manually before the physical pallet has left the
+  // warehouse (e.g. Marklyn). For them, auto-archive would drop the order from the worker
+  // queue too early. SKIP_AUTO_ARCHIVE_CLIENTS env var = comma-separated client names to
+  // opt out of auto-archive (case-insensitive match against `clientName`).
+  const skipClients = (process.env.SKIP_AUTO_ARCHIVE_CLIENTS || '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const ACTIVE_STATES = ['awaiting_putaway', 'staged', 'loading', 'loaded'];
-  let archived = 0;
+  let archived = 0, archiveSkipped = 0;
   try {
     const activeSnap = await db.collection('rfs_orders')
       .where('rfsState', 'in', ACTIVE_STATES)
@@ -507,13 +513,19 @@ async function runSync(actor) {
       return t.toMillis() < syncStartMs;
     });
     for (const doc of stale) {
+      const o = doc.data();
+      // Skip clients in the opt-out list — keep the order in the queue until the worker
+      // finishes putaway/load/BOL in the app (or an admin force-ships it).
+      if (o.clientName && skipClients.includes(String(o.clientName).toLowerCase())) {
+        archiveSkipped += 1;
+        continue;
+      }
       await doc.ref.update({
         rfsState: 'archived_externally',
         archivedAt: Timestamp.now(),
         archivedReason: 'No longer Ready to Ship in Logiwa (likely shipped manually).',
       });
       // Free any locations this order was holding
-      const o = doc.data();
       for (const p of (o.pallets || [])) {
         if (p.locationCode && p.state !== 'loaded') {
           const locRef = db.collection('rfs_locations').doc(locDocId(p.locationCode));
@@ -521,6 +533,9 @@ async function runSync(actor) {
         }
       }
       archived += 1;
+    }
+    if (archiveSkipped) {
+      console.log(`[sync] kept ${archiveSkipped} order(s) in queue per SKIP_AUTO_ARCHIVE_CLIENTS opt-out`);
     }
   } catch (archiveErr) {
     // Archive step is best-effort; a failure here shouldn't break the whole sync
@@ -1038,6 +1053,9 @@ app.post('/api/rfs/orders/:id/bol', requireAuth, upload.single('bol'), async (re
 // Explicit "ship the order" action — flips rfsState to shipped. Worker triggers this
 // after all the BOLs they need are uploaded. Decoupling lets one order accept many BOLs
 // across multiple trucks before being closed out.
+//
+// Admins can pass `?force=1` to ship from any non-shipped state — used when a client's
+// Logiwa status got flipped externally and the order is stuck in the worker queue.
 app.post('/api/rfs/orders/:id/ship', requireAuth, async (req, res) => {
   try {
     const ref = db.collection('rfs_orders').doc(req.params.id);
@@ -1045,24 +1063,44 @@ app.post('/api/rfs/orders/:id/ship', requireAuth, async (req, res) => {
     if (!snap.exists) return res.status(404).json({ error: 'Order not found' });
     const order = snap.data();
     if (order.rfsState === 'shipped') return res.json({ ok: true, alreadyShipped: true });
-    if (order.rfsState !== 'loaded') {
-      return res.status(400).json({ error: `Cannot ship order in state "${order.rfsState}". All pallets must be loaded first.` });
+
+    const force = req.query.force === '1' || req.body?.force === true;
+    if (force && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can force-ship orders' });
     }
+    if (!force && order.rfsState !== 'loaded') {
+      return res.status(400).json({ error: `Cannot ship order in state "${order.rfsState}". All pallets must be loaded first (or ask an admin to force-ship).` });
+    }
+
+    // If forcing from a non-loaded state, free any locations still locked to this order.
+    if (force && order.rfsState !== 'loaded') {
+      for (const p of (order.pallets || [])) {
+        if (p.locationCode && p.state !== 'loaded'
+            && String(p.locationCode).toLowerCase() !== 'floor') {
+          const locRef = db.collection('rfs_locations').doc(locDocId(p.locationCode));
+          locRef.update({ currentPalletOrderId: null, currentPalletOrderCode: null, currentPalletNo: null }).catch(() => {});
+        }
+      }
+    }
+
     await ref.update({
       rfsState: 'shipped',
       shippedAt: Timestamp.now(),
       shippedBy: req.email,
+      ...(force ? { forceShippedFrom: order.rfsState, forceShippedReason: req.body?.reason || null } : {}),
     });
     await logEvent({
       type: 'order.shipped',
       actor: req.user,
       subjectType: 'order',
       subjectId: req.params.id,
-      summary: `${order.logiwaCode}: shipped with ${(order.bols || []).length} BOL${(order.bols || []).length === 1 ? '' : 's'}`,
+      summary: `${order.logiwaCode}: ${force ? 'force-' : ''}shipped from ${order.rfsState} with ${(order.bols || []).length} BOL${(order.bols || []).length === 1 ? '' : 's'}`,
       meta: {
         orderCode: order.logiwaCode,
         clientName: order.clientName,
         bolCount: (order.bols || []).length,
+        forced: !!force,
+        forcedFromState: force ? order.rfsState : null,
       },
     });
     res.json({ ok: true });

@@ -305,6 +305,8 @@ async function renderOrderDetail() {
     const isLoading = order.rfsState === 'loading';
     const isLoaded = order.rfsState === 'loaded';
 
+    const isAdmin = state.user?.role === 'admin';
+    const canForceShip = isAdmin && !['shipped', 'archived_externally'].includes(order.rfsState);
     v.innerHTML = `
       <button class="btn secondary" id="btn-back">← Back</button>
       <div class="card" style="margin-top:12px">
@@ -320,6 +322,10 @@ async function renderOrderDetail() {
           ${order.proNumber ? `<div>PRO: ${escape(order.proNumber)}</div>` : ''}
           ${order.note ? `<div>Logiwa note: ${escape(order.note)}</div>` : ''}
         </div>
+        ${canForceShip ? `
+          <button class="btn" id="btn-force-ship" style="margin-top:10px;background:#c0392b">Force mark shipped (admin)</button>
+          <div class="hint" style="margin-top:4px">Use this only when the order has physically left but is stuck in the app — for example a client flipped the Logiwa status before pickup.</div>
+        ` : ''}
       </div>
 
       <div class="card">
@@ -337,6 +343,22 @@ async function renderOrderDetail() {
       <div id="action-area"></div>
     `;
     $('#btn-back').onclick = () => { state.selectedOrderId = null; state.editPutaway = false; stopScanner(); stopBolStream(); render(); };
+    $('#btn-force-ship')?.addEventListener('click', async () => {
+      const reason = prompt(`Force-mark ${order.logiwaCode} as shipped?\n\nThis bypasses the normal flow (current state: ${order.rfsState}). Locations holding pallets for this order will be freed.\n\nOptional: enter a reason for the audit log:`, '');
+      if (reason === null) return; // user cancelled
+      const btn = $('#btn-force-ship');
+      try {
+        btn.disabled = true; btn.textContent = 'Shipping…';
+        await api('POST', `/api/rfs/orders/${state.selectedOrderId}/ship?force=1`, { force: true, reason: reason || null });
+        toast('Order force-shipped');
+        state.selectedOrderId = null;
+        render();
+      } catch (e) {
+        toast(e.message, 'error');
+        btn.disabled = false;
+        btn.textContent = 'Force mark shipped (admin)';
+      }
+    });
     $('#btn-save-note').onclick = async () => {
       const btn = $('#btn-save-note');
       try {
