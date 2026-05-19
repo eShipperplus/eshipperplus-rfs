@@ -1,6 +1,6 @@
 // eShipper+ RFS service worker — offline shell + asset cache.
 // Bump CACHE when shipping a release to force old workers to drop their cache.
-const CACHE = 'rfs-v9-2026-05-19e';
+const CACHE = 'rfs-v10-2026-05-19f';
 const STATIC = ['/'];
 
 // Treat HTML AND JS as network-first so a deploy is reflected on the next

@@ -98,10 +98,10 @@
     }
     .topbar h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
     .topbar .brand { display: flex; align-items: center; gap: 12px; }
-    /* brightness(0) invert(1) turns the dark-indigo wordmark into pure white so it
-       reads cleanly against the indigo topbar — same technique used by the
-       WMS Productivity dashboard so all eShipper+ tools render the brand identically. */
-    .topbar .brand img { height: 34px; width: auto; display: block; filter: brightness(0) invert(1); }
+    /* The SVG is the dark-banner brand logo: white circle badge + purple swirl +
+       white wordmark + teal "+". It's designed to sit directly on a dark/indigo
+       surface with NO filter — exactly how the WMS Productivity dashboard renders it. */
+    .topbar .brand img { height: 34px; width: auto; display: block; }
     .topbar .brand .tag {
       font-size: 12px; font-weight: 600; letter-spacing: 0.12em;
       opacity: 0.9; text-transform: uppercase;
@@ -304,14 +304,14 @@
 </head>
 <body>
   <div id="boot-loader" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#f8f8f9;z-index:1000">
-    <div style="background:#34368a;border-radius:14px;padding:14px 20px;margin-bottom:10px;display:inline-flex"><img src="/logo-eshipper.svg" alt="eShipper+" style="height:40px;max-width:240px;object-fit:contain;filter:brightness(0) invert(1)" /></div>
+    <div style="background:#34368a;border-radius:14px;padding:14px 20px;margin-bottom:10px;display:inline-flex"><img src="/logo-eshipper.svg" alt="eShipper+" style="height:40px;max-width:240px;object-fit:contain" /></div>
     <div style="font-size:11px;font-weight:700;letter-spacing:0.18em;color:#34368a;text-transform:uppercase">RFS</div>
     <div id="boot-status" style="color:#75767e;font-size:14px;text-align:center;max-width:320px;padding:16px 16px 0">Loading…</div>
   </div>
 
   <div id="login" style="display:none">
     <div class="login-screen">
-      <div style="background:#34368a;border-radius:16px;padding:16px 24px;margin:0 auto 10px;display:inline-flex"><img src="/logo-eshipper.svg" alt="eShipper+" style="height:46px;max-width:260px;object-fit:contain;filter:brightness(0) invert(1)" /></div>
+      <div style="background:#34368a;border-radius:16px;padding:16px 24px;margin:0 auto 10px;display:inline-flex"><img src="/logo-eshipper.svg" alt="eShipper+" style="height:46px;max-width:260px;object-fit:contain" /></div>
       <div style="font-size:12px;font-weight:700;letter-spacing:0.18em;color:#34368a;text-transform:uppercase;margin-bottom:6px">RFS</div>
       <p class="hint" style="margin-top:0">Putaway and dispatch tracking</p>
       <div class="login-form" style="max-width: 320px; margin: 24px auto 0">
