@@ -2077,32 +2077,61 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// One-shot backfill: any order that's currently past awaiting_putaway should already
-// have its staged-notification accounted for. Stamp stagedNotifiedAt = stagedAt (or now)
-// on every order that doesn't have it yet, so the new one-shot guard won't double-fire
-// on existing orders that runSync resets back to awaiting_putaway.
-async function backfillStagedNotifiedAt() {
+// One-shot boot backfill for two notification guards on existing orders.
+//
+//  1. stagedNotifiedAt — set on any order past awaiting_putaway that doesn't already have it.
+//     Without this, runSync's archive/restore cycle could reset rfsState back to
+//     awaiting_putaway and trick the next save into re-firing order.staged.
+//
+//  2. dimsCompleteAt — set on any order whose pallets ALREADY have full L/W/H/weight but
+//     where dimsCompleteAt was never recorded (e.g. orders that finished putaway BEFORE
+//     the order.dims_complete feature was deployed). Without this, the first Save after
+//     deploy (even an Edit-putaway → Save with no changes) trips the
+//     `allComplete && !dimsCompleteAt` guard and fires order.dims_complete — which uses
+//     the same email template as order.staged, so it looks like a duplicate staged email.
+//
+// Both writes only touch docs missing the field, so this is idempotent across restarts.
+async function backfillNotificationGuards() {
   try {
     const states = ['staged', 'loading', 'loaded', 'shipped', 'archived_externally'];
     const snap = await db.collection('rfs_orders').where('rfsState', 'in', states).get();
-    let touched = 0;
+    let touchedStaged = 0;
+    let touchedDims = 0;
     const batch = db.batch();
+    const now = Timestamp.now();
     for (const doc of snap.docs) {
       const o = doc.data();
-      if (o.stagedNotifiedAt) continue;
-      batch.update(doc.ref, { stagedNotifiedAt: o.stagedAt || Timestamp.now() });
-      touched += 1;
-      if (touched >= 400) break; // Firestore batch cap = 500 writes; stay safely under
+      const updates = {};
+      if (!o.stagedNotifiedAt) {
+        updates.stagedNotifiedAt = o.stagedAt || now;
+        touchedStaged += 1;
+      }
+      if (!o.dimsCompleteAt) {
+        const pallets = Array.isArray(o.pallets) ? o.pallets : [];
+        const allComplete = pallets.length > 0 && pallets.every(p =>
+          Number(p.length) > 0 && Number(p.width) > 0 && Number(p.height) > 0 && Number(p.weight) > 0
+        );
+        if (allComplete) {
+          updates.dimsCompleteAt = o.stagedAt || now;
+          touchedDims += 1;
+        }
+      }
+      if (Object.keys(updates).length > 0) {
+        batch.update(doc.ref, updates);
+      }
+      // Firestore batch cap = 500 writes. Stop early if we're getting close — a follow-up
+      // boot will pick up whatever's left, which is fine because both backfills are idempotent.
+      if (touchedStaged + touchedDims >= 400) break;
     }
-    if (touched) {
+    if (touchedStaged || touchedDims) {
       await batch.commit();
-      console.log(`[boot] backfilled stagedNotifiedAt on ${touched} order(s)`);
+      console.log(`[boot] backfilled stagedNotifiedAt on ${touchedStaged} order(s), dimsCompleteAt on ${touchedDims} order(s)`);
     }
   } catch (err) {
-    console.error('[boot] stagedNotifiedAt backfill failed:', err.message);
+    console.error('[boot] notification-guard backfill failed:', err.message);
   }
 }
-backfillStagedNotifiedAt();
+backfillNotificationGuards();
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`eshipperplus-rfs listening on :${PORT}`));
