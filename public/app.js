@@ -5,7 +5,7 @@
 if (typeof firebase === 'undefined' || !window.FIREBASE_WEB_CONFIG) {
   const status = document.getElementById('boot-status');
   if (status) {
-    status.innerHTML = `<strong style="color:#c0392b">Loading failed</strong><br><br>
+    status.innerHTML = `<strong style="color:#c8344a">Loading failed</strong><br><br>
       The Firebase SDK didn't load. Most common cause on a managed device is the network blocking <code>gstatic.com</code>.<br><br>
       Try opening <code>https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js</code> directly in this device's browser — if that fails too, the device's network/firewall is blocking it.`;
   }
@@ -63,7 +63,7 @@ async function api(method, path, body, isForm) {
 const _bootTimer = setTimeout(() => {
   const status = document.getElementById('boot-status');
   if (status && document.getElementById('boot-loader').style.display !== 'none') {
-    status.innerHTML = `<strong style="color:#c0392b">Loading failed</strong><br><br>
+    status.innerHTML = `<strong style="color:#c8344a">Loading failed</strong><br><br>
       Could not initialise authentication. Most common causes on warehouse devices:<br>
       • Android WebView is out of date — update via Play Store<br>
       • Device's network blocks <code>gstatic.com</code> or <code>firebaseapp.com</code><br>
@@ -330,7 +330,7 @@ async function renderOrderDetail() {
           ${order.note ? `<div>Logiwa note: ${escape(order.note)}</div>` : ''}
         </div>
         ${canForceShip ? `
-          <button class="btn" id="btn-force-ship" style="margin-top:10px;background:#c0392b">Force mark shipped (admin)</button>
+          <button class="btn" id="btn-force-ship" style="margin-top:10px;background:#c8344a">Force mark shipped (admin)</button>
           <div class="hint" style="margin-top:4px">Use this only when the order has physically left but is stuck in the app — for example a client flipped the Logiwa status before pickup.</div>
         ` : ''}
       </div>
@@ -411,7 +411,7 @@ async function renderOrderDetail() {
           <div class="row" style="align-items:center;gap:10px">
             <div class="grow">
               <div><strong>BOL ${i + 1}</strong>${b.truckLabel ? ' · ' + escape(b.truckLabel) : ''}</div>
-              <div class="hint">${fmtTs(b.uploadedAt)} ${b.uploadedBy ? '· ' + escape(b.uploadedBy) : ''}${b.logiwaError ? ' · <span style="color:#c0392b">Logiwa: ' + escape(b.logiwaError) + '</span>' : ''}</div>
+              <div class="hint">${fmtTs(b.uploadedAt)} ${b.uploadedBy ? '· ' + escape(b.uploadedBy) : ''}${b.logiwaError ? ' · <span style="color:#c8344a">Logiwa: ' + escape(b.logiwaError) + '</span>' : ''}</div>
             </div>
             ${b.photoUrl ? `<a href="${escape(b.photoUrl)}" target="_blank" class="btn secondary" style="padding:6px 12px;min-height:0;font-size:12px">View</a>` : ''}
           </div>
@@ -506,8 +506,8 @@ function addPalletRow(rows, palletNo, existing) {
   //  - P1: "Apply to all below" — fills L/W/H/Wt of every other pallet with P1's values
   //  - P2 and later: "↑ Same as above" — copies dims/weight from the previous pallet
   const helperBtn = palletNo === 1
-    ? '<button data-action="apply-all" style="background:transparent;border:1px solid #0d3b66;color:#0d3b66;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">Apply to all below</button>'
-    : '<button data-action="copy-above" style="background:transparent;border:1px solid #0d3b66;color:#0d3b66;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">↑ Same as above</button>';
+    ? '<button data-action="apply-all" style="background:transparent;border:1px solid #34368a;color:#34368a;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">Apply to all below</button>'
+    : '<button data-action="copy-above" style="background:transparent;border:1px solid #34368a;color:#34368a;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">↑ Same as above</button>';
 
   const row = el(`
     <div class="pallet-row" data-row="${palletNo}">
@@ -528,7 +528,7 @@ function addPalletRow(rows, palletNo, existing) {
         <input type="number" inputmode="decimal" class="grow" placeholder="Wt" step="0.1" value="${existing?.weight ?? ''}" data-pallet="${palletNo}" data-field="weight" style="padding:8px;min-width:0" />
       </div>
       <div class="row" style="margin-top:4px;align-items:center;gap:8px">
-        <span class="hint grow">Pallet ID must start with <strong>RFS</strong> · Dims in <strong>${existing?.dimensionUnit || 'in'}</strong> · Weight in <strong>${existing?.weightUnit || 'lb'}</strong>${existing?.state === 'loaded' ? ' · <span style="color:#1f6b1f">loaded</span>' : (existing?.state === 'staged' ? ' · <span style="color:#0d3b66">staged</span>' : '')}</span>
+        <span class="hint grow">Pallet ID must start with <strong>RFS</strong> · Dims in <strong>${existing?.dimensionUnit || 'in'}</strong> · Weight in <strong>${existing?.weightUnit || 'lb'}</strong>${existing?.state === 'loaded' ? ' · <span style="color:#2f9e6f">loaded</span>' : (existing?.state === 'staged' ? ' · <span style="color:#34368a">staged</span>' : '')}</span>
         ${helperBtn}
       </div>
     </div>
@@ -702,7 +702,7 @@ function renderBOLUpload(area, order) {
       <div class="row" style="align-items:center;gap:10px">
         <div class="grow">
           <div><strong>BOL ${i + 1}</strong>${b.truckLabel ? ' · ' + escape(b.truckLabel) : ''}</div>
-          <div class="hint" style="margin-top:2px">${fmtTs(b.uploadedAt)} · ${escape(b.uploadedBy || '')}${b.logiwaError ? ' · <span style="color:#c0392b">Logiwa: ' + escape(b.logiwaError) + '</span>' : ' · <span style="color:#1f6b1f">in Logiwa</span>'}</div>
+          <div class="hint" style="margin-top:2px">${fmtTs(b.uploadedAt)} · ${escape(b.uploadedBy || '')}${b.logiwaError ? ' · <span style="color:#c8344a">Logiwa: ' + escape(b.logiwaError) + '</span>' : ' · <span style="color:#2f9e6f">in Logiwa</span>'}</div>
         </div>
         ${b.photoUrl ? `<a href="${escape(b.photoUrl)}" target="_blank" class="btn secondary" style="padding:6px 12px;min-height:0;font-size:12px">View</a>` : ''}
       </div>
@@ -743,10 +743,10 @@ function renderBOLUpload(area, order) {
       <button class="btn full" id="btn-upload-bol" style="margin-top:10px" disabled>Upload BOL</button>
     </div>
 
-    <div class="card" style="background:#f4f9f4;border:1px solid #c8e6c8">
-      <h3 style="margin-top:0;color:#1f6b1f">Done loading this order?</h3>
+    <div class="card" style="background:#e3f5ec;border:1px solid #b9e4cf">
+      <h3 style="margin-top:0;color:#2f9e6f">Done loading this order?</h3>
       <div class="meta" style="margin-bottom:8px">Tap below to mark the order shipped. ${bols.length === 0 ? 'You can mark shipped even without a BOL on file (upload one later).' : 'You can still upload additional BOLs after shipping if needed.'}</div>
-      <button class="btn full" id="btn-mark-shipped" style="background:#1f6b1f">Mark order shipped</button>
+      <button class="btn full" id="btn-mark-shipped" style="background:#2f9e6f">Mark order shipped</button>
     </div>
   `;
 
@@ -906,8 +906,8 @@ function renderLocationDetail({ location, currentOrder, currentPallet }) {
       <div class="meta">
         Zone: ${escape(location.zone || '—')} · Group: ${escape(location.group || '—')}<br>
         Barcode: <span style="font-family:ui-monospace,monospace">${escape(location.locationBarcode || location.code)}</span>
-        ${location.lockLocation ? '<br><span style="color:#c0392b">Locked</span>' : ''}
-        ${location.preventAllocation ? '<br><span style="color:#c0392b">Prevent allocation</span>' : ''}
+        ${location.lockLocation ? '<br><span style="color:#c8344a">Locked</span>' : ''}
+        ${location.preventAllocation ? '<br><span style="color:#c8344a">Prevent allocation</span>' : ''}
       </div>
     </div>
     ${currentOrder ? `
@@ -950,7 +950,7 @@ function openScanner(onResult) {
   if (!target) {
     modal = el(`
       <div id="scan-modal" style="position:fixed;inset:0;background:#000;z-index:1500;display:flex;flex-direction:column">
-        <div style="padding:14px 16px;color:#fff;display:flex;align-items:center;justify-content:space-between;background:#0d3b66">
+        <div style="padding:14px 16px;color:#fff;display:flex;align-items:center;justify-content:space-between;background:#34368a">
           <strong style="font-size:15px">Scan barcode</strong>
           <button id="scan-close-btn" style="background:transparent;border:none;color:#fff;font-size:28px;cursor:pointer;line-height:1">×</button>
         </div>
@@ -1018,7 +1018,7 @@ async function renderAdmin() {
     <div style="background:#fff;border:1px solid #e8eaed;border-radius:10px;padding:4px;display:flex;gap:2px;margin-bottom:14px;overflow-x:auto">
       ${tabs.map(t => `
         <button class="reports-subtab${state.reportsTab === t.id ? ' active' : ''}" data-rsub="${t.id}"
-          style="flex:1;min-width:90px;padding:10px 12px;border:none;background:${state.reportsTab === t.id ? '#0d3b66' : 'transparent'};color:${state.reportsTab === t.id ? '#fff' : '#0d3b66'};font-weight:600;border-radius:8px;cursor:pointer;font-size:14px">
+          style="flex:1;min-width:90px;padding:10px 12px;border:none;background:${state.reportsTab === t.id ? '#34368a' : 'transparent'};color:${state.reportsTab === t.id ? '#fff' : '#34368a'};font-weight:600;border-radius:8px;cursor:pointer;font-size:14px">
           ${t.label}
         </button>
       `).join('')}
@@ -1810,7 +1810,7 @@ function renderPOReceiptsTable() {
                 <td style="padding:8px">${fmtTs(p.arrivedAt)}</td>
                 <td style="padding:8px">${escape(p.arrivedBy || '')}</td>
                 <td style="padding:8px">${p.podPhotoUrl ? `<a href="${escape(p.podPhotoUrl)}" target="_blank" onclick="event.stopPropagation()">view</a>` : '—'}</td>
-                <td style="padding:8px">${p.isBlind ? '<span class="hint">no PO</span>' : (p.logiwaError ? '<span style="color:#c0392b">err</span>' : '<span style="color:#1f6b1f">ok</span>')}</td>
+                <td style="padding:8px">${p.isBlind ? '<span class="hint">no PO</span>' : (p.logiwaError ? '<span style="color:#c8344a">err</span>' : '<span style="color:#2f9e6f">ok</span>')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -1866,11 +1866,11 @@ function openPOEditModal(po) {
           <div class="meta" style="margin-bottom:8px">If the PO has now been created in Logiwa, paste its code here. The POD will be attached to it and the arrival date set in Logiwa.</div>
           <label>Logiwa PO code</label>
           <input type="text" id="ed-link-code" placeholder="e.g. TO4175" />
-          <button class="btn full" id="po-edit-link" style="margin-top:10px;background:#1f6b1f">Link to Logiwa PO</button>
+          <button class="btn full" id="po-edit-link" style="margin-top:10px;background:#2f9e6f">Link to Logiwa PO</button>
         ` : `
           <hr style="margin:18px 0;border:none;border-top:1px solid #e8eaed">
           <div class="meta">Linked to Logiwa PO <strong>${escape(po.logiwaCode)}</strong>${po.linkedAt ? ` on ${fmtTs(po.linkedAt)}` : ''}</div>
-          ${po.logiwaError ? `<div style="color:#c0392b;margin-top:6px;font-size:13px">Last Logiwa sync error: ${escape(po.logiwaError)}</div>` : ''}
+          ${po.logiwaError ? `<div style="color:#c8344a;margin-top:6px;font-size:13px">Last Logiwa sync error: ${escape(po.logiwaError)}</div>` : ''}
         `}
       </div>
     </div>
@@ -1951,7 +1951,7 @@ async function loadBlindBols() {
                 <td style="padding:8px">${escape(b.carrierName || '—')}</td>
                 <td style="padding:8px">${escape(b.truckLabel || '—')}</td>
                 <td style="padding:8px">${escape(b.uploadedBy || '—')}</td>
-                <td style="padding:8px">${b.orderCode ? (b.logiwaError ? `<span style="color:#c0392b">err: ${escape(b.logiwaError)}</span>` : '<span style="color:#1f6b1f">pushed</span>') : '<span class="hint">no code</span>'}</td>
+                <td style="padding:8px">${b.orderCode ? (b.logiwaError ? `<span style="color:#c8344a">err: ${escape(b.logiwaError)}</span>` : '<span style="color:#2f9e6f">pushed</span>') : '<span class="hint">no code</span>'}</td>
                 <td style="padding:8px">${escape(b.note || '')}</td>
                 <td style="padding:8px">${b.photoUrl ? `<a href="${escape(b.photoUrl)}" target="_blank">View</a>` : '—'}</td>
               </tr>
@@ -1990,7 +1990,7 @@ async function loadEventsLog() {
             ${events.map(e => `
               <tr style="border-top:1px solid #e8eaed">
                 <td style="padding:8px;white-space:nowrap">${fmtTs(e.at)}</td>
-                <td style="padding:8px"><span class="badge" style="background:#eef;color:#0d3b66">${escape(e.type)}</span></td>
+                <td style="padding:8px"><span class="badge" style="background:#e8e9f3;color:#34368a">${escape(e.type)}</span></td>
                 <td style="padding:8px">${escape(e.actor?.email || '—')}</td>
                 <td style="padding:8px">${escape(e.summary || '')}</td>
               </tr>
@@ -2077,7 +2077,7 @@ function renderAdminHistoryTable() {
               const wait = computeWait(o);
               const waitCell = wait
                 ? (wait.ongoing
-                    ? `<span style="color:#c0392b;font-weight:600">${fmtDuration(wait.ms)}</span><br><span class="hint">sitting</span>`
+                    ? `<span style="color:#c8344a;font-weight:600">${fmtDuration(wait.ms)}</span><br><span class="hint">sitting</span>`
                     : `${fmtDuration(wait.ms)}`)
                 : '—';
               return `
@@ -2223,7 +2223,7 @@ function renderPendingList() {
           <div class="hint" style="margin-top:2px">${escape(p.clientName || '—')} · ${escape(p.vendorDisplayName || '—')}${p.purchaseOrderTypeName ? ' · ' + escape(p.purchaseOrderTypeName) : ''}</div>
           <div class="hint">Planned arrival: ${fmtDate(p.plannedArrivalDate)} · Qty: ${p.totalQuantity || 0}</div>
         </div>
-        <div style="font-size:12px;color:#0d3b66">Open →</div>
+        <div style="font-size:12px;color:#34368a">Open →</div>
       </div>
     </div>
   `).join('');
@@ -2278,7 +2278,7 @@ function renderPOArrival() {
         <div class="meta">
           Received as <strong>${po.count} ${escape(po.receiptType)}</strong> on ${fmtTs(po.arrivedAt)} by ${escape(po.arrivedBy || '')}.
           ${po.receiveNote ? '<br>Note: ' + escape(po.receiveNote) : ''}
-          ${po.logiwaError ? '<br><span style="color:#c0392b">Logiwa sync issue: ' + escape(po.logiwaError) + '</span>' : ''}
+          ${po.logiwaError ? '<br><span style="color:#c8344a">Logiwa sync issue: ' + escape(po.logiwaError) + '</span>' : ''}
         </div>
         ${po.podPhotoUrl ? `<a href="${escape(po.podPhotoUrl)}" target="_blank" class="btn full" style="margin-top:10px">View POD photo</a>` : ''}
       </div>
