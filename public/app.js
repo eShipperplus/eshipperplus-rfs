@@ -210,6 +210,12 @@ function renderScan() {
       </div>
       <div class="hint" style="margin-top:10px;text-align:center">${state.lastSyncAt ? 'Last synced ' + Math.round((Date.now()-state.lastSyncAt)/1000) + 's ago' : 'Syncing…'}</div>
     </div>
+
+    <div class="card">
+      <h3>BOL without an order in the app?</h3>
+      <div class="meta" style="margin-bottom:8px">Use this if the driver brings a BOL for an order you can't find in the queue (already shipped, never tracked here, etc.). You can optionally tag it with a Logiwa order code and we'll push it to Logiwa too.</div>
+      <button class="btn secondary full" id="btn-blind-bol">Record BOL without order</button>
+    </div>
   `;
   openScanner((code) => lookupOrderByCode(code));
   $('#btn-manual').onclick = () => {
@@ -219,6 +225,7 @@ function renderScan() {
   $('#manual-code').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('#btn-manual').click();
   });
+  $('#btn-blind-bol').onclick = () => { stopScanner(); renderBlindBol(); };
 }
 
 // ─── queue (read-only list of pending orders) ────────────────────────────────
@@ -993,6 +1000,7 @@ function stopScanner() {
 const REPORT_SUBTABS = [
   { id: 'orders',        label: 'Orders',        roles: ['admin','supervisor','csm'] },
   { id: 'pos',           label: 'POs',           roles: ['admin','supervisor','csm'] },
+  { id: 'blind-bols',    label: 'Blind BOLs',    roles: ['admin','supervisor','csm'] },
   { id: 'activity',      label: 'Activity',      roles: ['admin','supervisor','csm'] },
   { id: 'users',         label: 'Users',         roles: ['admin'] },
   { id: 'notifications', label: 'Notifications', roles: ['admin'] },
@@ -1072,6 +1080,28 @@ async function renderReportsContent() {
     $('#btn-po-export').onclick = () => exportPOReceiptsCSV();
     loadAdminPOReceipts();
 
+  } else if (tab === 'blind-bols') {
+    host.innerHTML = `
+      <div class="card">
+        <h3>BOLs uploaded without an order</h3>
+        <div class="meta" style="margin-bottom:8px">BOLs captured via "Record BOL without order" on the Scan tab. If an order code was provided we also tried to push the BOL to Logiwa — the status is shown below.</div>
+        <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:6px">
+          <label style="margin:0;flex:0 0 auto">Show last</label>
+          <select id="bbol-days" style="width:auto">
+            <option value="7">7 days</option>
+            <option value="30" selected>30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+          </select>
+          <button class="btn secondary" id="btn-bbol-refresh" style="padding:8px 12px;min-height:0">Refresh</button>
+        </div>
+        <div id="blind-bols-list"><div class="loader">Loading…</div></div>
+      </div>
+    `;
+    $('#bbol-days').onchange = () => loadBlindBols();
+    $('#btn-bbol-refresh').onclick = () => loadBlindBols();
+    loadBlindBols();
+
   } else if (tab === 'activity') {
     host.innerHTML = `
       <div class="card">
@@ -1089,6 +1119,8 @@ async function renderReportsContent() {
             <option value="order.staged">Putaway</option>
             <option value="pallet.loaded">Pallet loaded</option>
             <option value="bol.uploaded">BOL uploaded</option>
+            <option value="bol.blind_recorded">BOL (blind)</option>
+            <option value="order.shipped">Order shipped</option>
             <option value="po.arrived">PO received</option>
             <option value="po.blind_received">Blind receipt</option>
             <option value="user.created">User created</option>
@@ -1886,6 +1918,53 @@ function openPOEditModal(po) {
   }
 }
 
+async function loadBlindBols() {
+  const host = $('#blind-bols-list');
+  if (!host) return;
+  host.innerHTML = '<div class="loader">Loading…</div>';
+  try {
+    const days = $('#bbol-days').value;
+    const { bols } = await api('GET', `/api/rfs/admin/blind-bols?days=${days}`);
+    if (!bols.length) { host.innerHTML = '<div class="empty" style="padding:16px">No blind BOLs in this window.</div>'; return; }
+    host.innerHTML = `
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="text-align:left;background:#f7f9fb">
+              <th style="padding:8px">When</th>
+              <th style="padding:8px">Order code</th>
+              <th style="padding:8px">Client</th>
+              <th style="padding:8px">Carrier</th>
+              <th style="padding:8px">Truck / label</th>
+              <th style="padding:8px">Uploaded by</th>
+              <th style="padding:8px">Logiwa</th>
+              <th style="padding:8px">Note</th>
+              <th style="padding:8px">Photo</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${bols.map(b => `
+              <tr style="border-top:1px solid #e8eaed">
+                <td style="padding:8px;white-space:nowrap">${fmtTs(b.uploadedAt)}</td>
+                <td style="padding:8px;font-family:ui-monospace,monospace">${escape(b.orderCode || '—')}</td>
+                <td style="padding:8px">${escape(b.clientName || '—')}</td>
+                <td style="padding:8px">${escape(b.carrierName || '—')}</td>
+                <td style="padding:8px">${escape(b.truckLabel || '—')}</td>
+                <td style="padding:8px">${escape(b.uploadedBy || '—')}</td>
+                <td style="padding:8px">${b.orderCode ? (b.logiwaError ? `<span style="color:#c0392b">err: ${escape(b.logiwaError)}</span>` : '<span style="color:#1f6b1f">pushed</span>') : '<span class="hint">no code</span>'}</td>
+                <td style="padding:8px">${escape(b.note || '')}</td>
+                <td style="padding:8px">${b.photoUrl ? `<a href="${escape(b.photoUrl)}" target="_blank">View</a>` : '—'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch (err) {
+    host.innerHTML = `<div class="empty">Failed: ${escape(err.message)}</div>`;
+  }
+}
+
 async function loadEventsLog() {
   const host = $('#events-list');
   if (!host) return;
@@ -2453,6 +2532,159 @@ async function renderBlindReceipt() {
       toast(e.message, 'error');
       btnSubmit.disabled = false;
       btnSubmit.textContent = 'Submit receipt';
+    }
+  };
+}
+
+// ─── Blind BOL upload (no order in app) ──────────────────────────────────────
+// Captures a signed BOL even when the matching order isn't in the RFS queue.
+// If the user provides a Logiwa order code we'll still try to push the BOL into
+// Logiwa as DocumentType=5; otherwise it's filed under rfs_blind_bols for audit.
+async function renderBlindBol() {
+  const v = $('#view');
+  v.innerHTML = `
+    <button class="btn secondary" id="btn-back-blind-bol">← Back</button>
+    <div class="card" style="margin-top:12px">
+      <h3>Record BOL without an order</h3>
+      <div class="meta" style="margin-bottom:8px">Use this when a driver hands you a signed BOL for a shipment that isn't in the app's queue. If you have the Logiwa order code we'll still push the BOL into Logiwa — otherwise we'll just file the photo.</div>
+    </div>
+    <div class="card">
+      <h3>Reference info</h3>
+      <label>Logiwa order code (optional)</label>
+      <div class="row" style="gap:6px;align-items:flex-start">
+        <input type="text" id="bb-order-code" placeholder="e.g. ANS_500163 — leave blank if unknown" class="grow" style="text-transform:uppercase" />
+        <button class="btn secondary" id="btn-bb-scan-order" style="padding:10px 14px;min-height:0">Scan</button>
+      </div>
+      <div class="hint" style="margin:-4px 0 10px">If provided, we'll attempt to upload the BOL to Logiwa under this order.</div>
+
+      <label>Client (optional)</label>
+      <input type="text" id="bb-client" list="bb-client-list" placeholder="Type or pick — leave blank if unknown" />
+      <datalist id="bb-client-list"></datalist>
+
+      <label>Carrier (optional)</label>
+      <input type="text" id="bb-carrier" placeholder="e.g. Day & Ross, Maersk" />
+
+      <label>Truck / driver label (optional)</label>
+      <input type="text" id="bb-truck" placeholder="e.g. Truck 1, Driver name" />
+
+      <label>Notes (optional)</label>
+      <input type="text" id="bb-note" placeholder="Any context for whoever reviews this later" />
+    </div>
+    <div class="card">
+      <h3>BOL photo</h3>
+      <div class="meta" style="margin-bottom:8px">Snap a clear photo of the full BOL. The image is saved to the audit log.</div>
+      <div id="bb-cam-area">
+        <video id="bb-video" style="width:100%;max-height:75vh;border-radius:8px;background:#000;object-fit:contain;display:block" playsinline autoplay muted></video>
+        <div id="bb-cam-status" class="hint" style="text-align:center;margin:6px 0">Starting camera…</div>
+        <button class="btn full" id="btn-bb-snap" style="margin-top:6px">Capture photo</button>
+        <div style="text-align:center;margin:10px 0;color:#888;font-size:13px">— or —</div>
+        <label class="btn secondary full" for="bb-file" style="cursor:pointer">Choose file from device</label>
+        <input type="file" id="bb-file" accept="image/*" capture="environment" style="display:none" />
+      </div>
+      <canvas id="bb-canvas" style="display:none"></canvas>
+      <div id="bb-preview-area" style="display:none">
+        <img id="bb-preview" style="max-width:100%;border-radius:8px;margin-top:10px" />
+        <button class="btn secondary full" id="btn-bb-retake" style="margin-top:8px">Retake</button>
+      </div>
+      <button class="btn full" id="btn-bb-submit" style="margin-top:10px" disabled>Submit BOL</button>
+    </div>
+  `;
+
+  $('#btn-back-blind-bol').onclick = () => { stopBolStream(); render(); };
+
+  // Force uppercase as the user types (order codes are uppercase in Logiwa).
+  const codeInp = $('#bb-order-code');
+  codeInp.addEventListener('input', () => { codeInp.value = codeInp.value.toUpperCase(); });
+
+  // Scan button — fills the order code from a barcode.
+  $('#btn-bb-scan-order').onclick = () => openScanner((code) => {
+    codeInp.value = String(code).trim().toUpperCase();
+    stopScanner();
+  });
+
+  // Populate client autocomplete from the server (best-effort).
+  api('GET', '/api/rfs/clients').then(({ clients }) => {
+    const dl = $('#bb-client-list');
+    if (dl && Array.isArray(clients)) {
+      dl.innerHTML = clients.map(c => `<option value="${escape(c)}"></option>`).join('');
+    }
+  }).catch(() => {});
+
+  let blob = null;
+  const video = $('#bb-video'), canvas = $('#bb-canvas'), preview = $('#bb-preview');
+  const status = $('#bb-cam-status'), camArea = $('#bb-cam-area'), previewArea = $('#bb-preview-area');
+  const fileInp = $('#bb-file'), btnSnap = $('#btn-bb-snap'), btnRetake = $('#btn-bb-retake'), btnSubmit = $('#btn-bb-submit');
+
+  async function startCam() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+      state.bolStream = stream;
+      video.srcObject = stream;
+      status.textContent = 'Position the BOL in frame and tap Capture.';
+    } catch (err) {
+      video.style.display = 'none';
+      btnSnap.style.display = 'none';
+      status.textContent = 'Camera unavailable — use "Choose file from device".';
+    }
+  }
+  startCam();
+
+  function showPreview(b) {
+    blob = b;
+    preview.src = URL.createObjectURL(b);
+    camArea.style.display = 'none';
+    previewArea.style.display = '';
+    btnSubmit.disabled = false;
+    stopBolStream();
+  }
+  btnSnap.onclick = () => {
+    if (!video.videoWidth) { toast('Camera not ready', 'error'); return; }
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    canvas.toBlob((b) => { if (b) showPreview(b); }, 'image/jpeg', 0.9);
+  };
+  btnRetake.onclick = () => {
+    blob = null; preview.src = ''; previewArea.style.display = 'none';
+    camArea.style.display = ''; btnSubmit.disabled = true; fileInp.value = '';
+    startCam();
+  };
+  fileInp.onchange = () => { const f = fileInp.files?.[0]; if (f) showPreview(f); };
+
+  btnSubmit.onclick = async () => {
+    if (!blob) { toast('BOL photo required', 'error'); return; }
+    const orderCode = $('#bb-order-code').value.trim().toUpperCase();
+    const clientName = $('#bb-client').value.trim();
+    const carrierName = $('#bb-carrier').value.trim();
+    const truckLabel = $('#bb-truck').value.trim();
+    const note = $('#bb-note').value.trim();
+    const fd = new FormData();
+    fd.append('bol', blob, blob.name || `bol-${Date.now()}.jpg`);
+    if (orderCode) fd.append('orderCode', orderCode);
+    if (clientName) fd.append('clientName', clientName);
+    if (carrierName) fd.append('carrierName', carrierName);
+    if (truckLabel) fd.append('truckLabel', truckLabel);
+    if (note) fd.append('note', note);
+    try {
+      btnSubmit.disabled = true;
+      btnSubmit.textContent = 'Submitting…';
+      const r = await api('POST', '/api/rfs/bols/blind', fd, true);
+      if (r.logiwaError) toast('BOL saved, but Logiwa: ' + r.logiwaError, 'error');
+      else if (orderCode) toast('BOL saved and pushed to Logiwa');
+      else toast('BOL recorded');
+      stopBolStream();
+      state.view = 'scan';
+      render();
+    } catch (e) {
+      toast(e.message, 'error');
+      btnSubmit.disabled = false;
+      btnSubmit.textContent = 'Submit BOL';
     }
   };
 }

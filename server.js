@@ -873,6 +873,88 @@ app.post('/api/rfs/orders/:id/load-pallet', requireAuth, async (req, res) => {
   }
 });
 
+// ─── Blind BOL upload (no order in the app) ──────────────────────────────────
+// Use case: driver shows up with a BOL for an order that's already shipped, or that was
+// never tracked through the app. Save the photo + metadata + optionally push to Logiwa.
+app.post('/api/rfs/bols/blind', requireAuth, upload.single('bol'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'BOL file required (field name: bol)' });
+    const orderCode = (req.body.orderCode || '').toString().trim() || null;
+    const clientName = (req.body.clientName || '').toString().trim() || null;
+    const carrierName = (req.body.carrierName || '').toString().trim() || null;
+    const truckLabel = (req.body.truckLabel || '').toString().trim() || null;
+    const note = (req.body.note || '').toString().trim() || null;
+
+    const ts = Date.now();
+    const ext = (req.file.originalname.split('.').pop() || 'jpg').toLowerCase();
+    const slug = (orderCode || clientName || 'unattached').toString().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30) || 'unattached';
+    const storagePath = `rfs-bols/blind/${slug}/${ts}.${ext}`;
+    const file = bucket.file(storagePath);
+    await file.save(req.file.buffer, { contentType: req.file.mimetype, resumable: false });
+    const [signedUrl] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000 });
+
+    // If the worker provided an order code, try pushing the BOL to Logiwa as well.
+    // Best-effort — we still record the BOL locally even if Logiwa rejects it.
+    let logiwaResult = null;
+    let logiwaError = null;
+    if (orderCode) {
+      try {
+        const pdfBuffer = await ensurePdf(req.file.buffer, req.file.mimetype);
+        logiwaResult = await logiwa.uploadShipmentDocument({
+          shipmentOrderCode: orderCode,
+          fileName: `BOL_${orderCode}_${ts}${truckLabel ? '_' + truckLabel.replace(/[^a-zA-Z0-9-]/g, '_') : ''}.pdf`,
+          buffer: pdfBuffer,
+          mimeType: 'application/pdf',
+          trackingNumber: orderCode,
+          documentType: logiwa.DOCUMENT_TYPE_CARRIER_LABEL,
+        });
+      } catch (e) {
+        logiwaError = e.message;
+        console.error('Blind BOL Logiwa upload failed:', logiwaError);
+      }
+    }
+
+    const ref = db.collection('rfs_blind_bols').doc();
+    await ref.set({
+      orderCode,
+      clientName,
+      carrierName,
+      truckLabel,
+      note,
+      photoUrl: signedUrl,
+      storagePath,
+      logiwaDocumentResult: logiwaResult,
+      logiwaError: logiwaError || null,
+      uploadedAt: Timestamp.now(),
+      uploadedBy: req.email,
+    });
+
+    await logEvent({
+      type: 'bol.blind_recorded',
+      actor: req.user,
+      subjectType: 'bol',
+      subjectId: ref.id,
+      summary: `Blind BOL recorded${orderCode ? ' for ' + orderCode : ' (no order code)'}${truckLabel ? ' · ' + truckLabel : ''}${logiwaError ? ' — Logiwa sync issue' : (orderCode ? ' — pushed to Logiwa' : '')}`,
+      meta: { orderCode, clientName, carrierName, truckLabel, logiwaError },
+    });
+
+    res.json({ ok: true, id: ref.id, photoUrl: signedUrl, logiwaError });
+  } catch (err) {
+    console.error('blind bol error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: list recent blind BOLs
+app.get('/api/rfs/admin/blind-bols', requireAuth, requireRole(...REPORT_ROLES), async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days || '30', 10), 365);
+    const since = Timestamp.fromMillis(Date.now() - days * 24 * 60 * 60 * 1000);
+    const snap = await db.collection('rfs_blind_bols').where('uploadedAt', '>=', since).orderBy('uploadedAt', 'desc').limit(500).get();
+    res.json({ bols: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── Unload a pallet ─────────────────────────────────────────────────────────
 // Reverses a load-pallet action. Sets the pallet state back to staged (or pending if no
 // location), re-locks the location if it's still free, and downgrades the order's rfsState.
@@ -1717,7 +1799,7 @@ app.get('/api/rfs/admin/pos', requireAuth, requireRole(...REPORT_ROLES), async (
 });
 
 // ─── Notification rules (admin) ──────────────────────────────────────────────
-const NOTIFY_EVENTS = ['order.staged', 'order.dims_complete', 'order.updated', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
+const NOTIFY_EVENTS = ['order.staged', 'order.dims_complete', 'order.updated', 'pallet.loaded', 'pallet.unloaded', 'bol.uploaded', 'bol.blind_recorded', 'order.shipped', 'po.arrived', 'po.blind_received', 'po.linked', 'sync.run'];
 const NOTIFY_CONDITIONS = ['always', 'has_dims', 'has_weight', 'all_dims_weight_complete'];
 
 app.get('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
