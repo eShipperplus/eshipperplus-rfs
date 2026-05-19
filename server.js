@@ -242,15 +242,27 @@ function renderEmailSubject(event) {
 // `eyebrow` is the small caps label above the title (e.g. "Putaway done", "BOL uploaded").
 // `title` is the main heading shown to the recipient (e.g. the order code + customer).
 function renderEmailShell({ eyebrow, title, bodyHtml }) {
+  // Brand wordmark is rendered as text rather than image — many email clients
+  // (Gmail web, Outlook) block external images by default until the recipient
+  // clicks "Display images", so a typographic mark survives every render path.
   return `
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#f8f8f9;padding:24px 12px;font-family:'Inter',-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
       <tr>
         <td align="center">
           <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="640" style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e6e7e8;box-shadow:0 1px 3px rgba(22,23,26,0.08)">
             <tr>
-              <td style="background:#34368a;padding:20px 28px;color:#ffffff">
-                <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85">${esc(eyebrow || 'eShipper+ RFS')}</div>
-                <div style="font-size:20px;font-weight:600;letter-spacing:-0.01em;margin-top:4px">${esc(title || '')}</div>
+              <td style="background:#34368a;padding:22px 28px;color:#ffffff">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#ffffff;line-height:1">
+                      eShipper<span style="color:#62c0ae">+</span>
+                    </td>
+                    <td align="right" style="font-size:11px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:rgba(255,255,255,0.85);vertical-align:middle">RFS</td>
+                  </tr>
+                </table>
+                <div style="height:14px;line-height:14px;font-size:0">&nbsp;</div>
+                <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85">${esc(eyebrow || 'Notification')}</div>
+                <div style="font-size:20px;font-weight:600;letter-spacing:-0.01em;margin-top:4px;color:#ffffff">${esc(title || '')}</div>
               </td>
             </tr>
             <tr>
