@@ -477,13 +477,19 @@ async function runSync(actor) {
       created += 1;
     } else {
       // If this order was archived in a previous sync but Logiwa returned it again,
-      // restore it to its prior active state (or awaiting_putaway as a safe default).
+      // restore it to whatever state it was in BEFORE archiving (staged/loading/loaded).
+      // Falling back to awaiting_putaway only when we don't have prevRfsState recorded
+      // (e.g. orders archived before this fix was deployed).
       const existing = snap.data();
       const updates = { ...base };
       if (existing.rfsState === 'archived_externally') {
-        updates.rfsState = 'awaiting_putaway';
+        const restorable = ['staged', 'loading', 'loaded'];
+        updates.rfsState = restorable.includes(existing.prevRfsState)
+          ? existing.prevRfsState
+          : 'awaiting_putaway';
         updates.archivedAt = FieldValue.delete();
         updates.archivedReason = FieldValue.delete();
+        updates.prevRfsState = FieldValue.delete();
       }
       await ref.update(updates);
       updated += 1;
@@ -522,6 +528,9 @@ async function runSync(actor) {
       }
       await doc.ref.update({
         rfsState: 'archived_externally',
+        // Capture the state we're archiving FROM so the restore path can put the order
+        // back in the right state if Logiwa returns it later (e.g. status flicker).
+        prevRfsState: o.rfsState,
         archivedAt: Timestamp.now(),
         archivedReason: 'No longer Ready to Ship in Logiwa (likely shipped manually).',
       });
@@ -726,6 +735,14 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
         updates.stagedAt = Timestamp.now();
         updates.stagedBy = req.email;
         txResult.didStageTransition = true;
+        // Capture whether this is the FIRST time the order has reached staged. The notification
+        // fires only on the first transition — see logEvent call below. If runSync ever resets
+        // rfsState back to awaiting_putaway (archive/restore cycle) and a worker re-saves,
+        // didStageTransition will be true but stagedNotifiedAt already set → audit-only event.
+        txResult.stagedNotifiedAlready = !!order.stagedNotifiedAt;
+        if (!order.stagedNotifiedAt) {
+          updates.stagedNotifiedAt = Timestamp.now();
+        }
       } else if (!allStaged && order.rfsState === 'staged') {
         // Partial save after a previously fully-staged order — revert to awaiting_putaway
         updates.rfsState = 'awaiting_putaway';
@@ -738,11 +755,16 @@ app.post('/api/rfs/orders/:id/putaway', requireAuth, async (req, res) => {
     const summary = (fresh.pallets || [])
       .map(p => `P${p.palletNo}${p.palletId ? ' [' + p.palletId + ']' : ''}${p.locationCode ? ' @ ' + p.locationCode : ' (pending)'}${p.weight ? ' ' + p.weight + (p.weightUnit||'lb') : ''}`)
       .join(' | ');
-    // Fire `order.staged` ONLY when the order actually transitions from awaiting_putaway → staged.
-    // Subsequent edits (re-saving an already-staged order) log as `order.updated` so audit history
-    // is preserved but notification rules don't re-fire emails every time.
+    // Fire `order.staged` ONLY when the order ACTUALLY hits staged for the first time, ever.
+    // `didStageTransition` catches the awaiting_putaway → staged flip, but that flip can happen
+    // more than once for the same order if runSync's archive/restore cycle reset rfsState back
+    // to awaiting_putaway (e.g. Logiwa briefly dropped the order from status=16 and returned it).
+    // The `stagedNotifiedAlready` guard ensures the notification + email fire at most once per
+    // order doc, regardless of how many times state churns. Subsequent saves log as
+    // `order.updated` for audit history only.
+    const firstStagedFire = txResult.didStageTransition && !txResult.stagedNotifiedAlready;
     await logEvent({
-      type: txResult.didStageTransition ? 'order.staged' : 'order.updated',
+      type: firstStagedFire ? 'order.staged' : 'order.updated',
       actor: req.user,
       subjectType: 'order',
       subjectId: req.params.id,
@@ -2054,6 +2076,33 @@ app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+
+// One-shot backfill: any order that's currently past awaiting_putaway should already
+// have its staged-notification accounted for. Stamp stagedNotifiedAt = stagedAt (or now)
+// on every order that doesn't have it yet, so the new one-shot guard won't double-fire
+// on existing orders that runSync resets back to awaiting_putaway.
+async function backfillStagedNotifiedAt() {
+  try {
+    const states = ['staged', 'loading', 'loaded', 'shipped', 'archived_externally'];
+    const snap = await db.collection('rfs_orders').where('rfsState', 'in', states).get();
+    let touched = 0;
+    const batch = db.batch();
+    for (const doc of snap.docs) {
+      const o = doc.data();
+      if (o.stagedNotifiedAt) continue;
+      batch.update(doc.ref, { stagedNotifiedAt: o.stagedAt || Timestamp.now() });
+      touched += 1;
+      if (touched >= 400) break; // Firestore batch cap = 500 writes; stay safely under
+    }
+    if (touched) {
+      await batch.commit();
+      console.log(`[boot] backfilled stagedNotifiedAt on ${touched} order(s)`);
+    }
+  } catch (err) {
+    console.error('[boot] stagedNotifiedAt backfill failed:', err.message);
+  }
+}
+backfillStagedNotifiedAt();
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`eshipperplus-rfs listening on :${PORT}`));
