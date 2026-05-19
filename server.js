@@ -235,6 +235,41 @@ function renderEmailSubject(event) {
   }
 }
 
+// Branded email shell — wraps the per-event body in an eShipper+ template:
+//   - indigo header band with eyebrow label + bold title (Outlook-safe table layout)
+//   - white card body with the actual content
+//   - muted footer
+// `eyebrow` is the small caps label above the title (e.g. "Putaway done", "BOL uploaded").
+// `title` is the main heading shown to the recipient (e.g. the order code + customer).
+function renderEmailShell({ eyebrow, title, bodyHtml }) {
+  return `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#f8f8f9;padding:24px 12px;font-family:'Inter',-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+      <tr>
+        <td align="center">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="640" style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e6e7e8;box-shadow:0 1px 3px rgba(22,23,26,0.08)">
+            <tr>
+              <td style="background:#34368a;padding:20px 28px;color:#ffffff">
+                <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85">${esc(eyebrow || 'eShipper+ RFS')}</div>
+                <div style="font-size:20px;font-weight:600;letter-spacing:-0.01em;margin-top:4px">${esc(title || '')}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px 28px 8px 28px;font-size:14px;color:#16171a;line-height:1.55">
+                ${bodyHtml}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:14px 28px 22px 28px;border-top:1px solid #f1f1f3;color:#75767e;font-size:12px">
+                eShipper+ RFS · automated notification
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
 function renderEmailBody(event) {
   if (event.type === 'order.staged' || event.type === 'order.dims_complete') return renderOrderStagedBody(event);
   // Generic table body for everything else (BOL upload, PO arrive, etc.)
@@ -244,27 +279,49 @@ function renderEmailBody(event) {
     const wt = p.weight ? `${p.weight} ${esc(p.weightUnit || 'lb')}` : '';
     return `<tr><td style="padding:4px 12px 4px 0">P${p.palletNo}</td><td style="padding:4px 12px 4px 0">${esc(p.locationCode || '—')}</td><td style="padding:4px 12px 4px 0">${dims}</td><td style="padding:4px 0">${wt}</td></tr>`;
   }).join('');
-  return `
-    <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#1a1a1a">
-      <p><strong>${esc(event.summary || event.type)}</strong></p>
-      <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
-        ${event.actor?.email ? `<tr><td style="padding:2px 12px 2px 0;color:#666">By</td><td>${esc(event.actor.email)}</td></tr>` : ''}
-        ${m.orderCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Order</td><td>${esc(m.orderCode)}</td></tr>` : ''}
-        ${m.poCode ? `<tr><td style="padding:2px 12px 2px 0;color:#666">PO</td><td>${esc(m.poCode)}</td></tr>` : ''}
-        ${m.clientName ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Client</td><td>${esc(m.clientName)}</td></tr>` : ''}
-        ${m.receiptType ? `<tr><td style="padding:2px 12px 2px 0;color:#666">Received</td><td>${esc(m.count + ' ' + m.receiptType)}</td></tr>` : ''}
-      </table>
-      ${palletList ? `<p style="margin-top:14px"><strong>Pallets</strong></p>
-        <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
-          <tr style="color:#666"><td style="padding:2px 12px 2px 0">#</td><td style="padding:2px 12px 2px 0">Location</td><td style="padding:2px 12px 2px 0">Dims</td><td style="padding:2px 0">Weight</td></tr>
-          ${palletList}
-        </table>` : ''}
-      <p style="margin-top:14px;color:#777;font-size:12px">eShipper+ RFS · automated notification</p>
-    </div>
+
+  // Per-event eyebrow + title for the shell header.
+  const eyebrowMap = {
+    'bol.uploaded': 'BOL uploaded',
+    'bol.blind_recorded': 'BOL recorded (blind)',
+    'order.shipped': 'Order shipped',
+    'order.updated': 'Order updated',
+    'pallet.loaded': 'Pallet loaded',
+    'pallet.unloaded': 'Pallet unloaded',
+    'po.arrived': 'PO received',
+    'po.blind_received': 'Blind receipt',
+    'po.linked': 'PO linked',
+    'sync.run': 'Logiwa sync',
+  };
+  const eyebrow = eyebrowMap[event.type] || 'RFS event';
+  const titleParts = [m.orderCode || m.poCode, m.clientName].filter(Boolean);
+  const title = titleParts.join(' · ') || event.summary || event.type;
+
+  const bodyHtml = `
+    <p style="margin:0 0 12px 0">${esc(event.summary || event.type)}</p>
+    <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px">
+      ${event.actor?.email ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e;white-space:nowrap">By</td><td>${esc(event.actor.email)}</td></tr>` : ''}
+      ${m.orderCode ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e">Order</td><td><strong>${esc(m.orderCode)}</strong></td></tr>` : ''}
+      ${m.poCode ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e">PO</td><td><strong>${esc(m.poCode)}</strong></td></tr>` : ''}
+      ${m.clientName ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e">Client</td><td>${esc(m.clientName)}</td></tr>` : ''}
+      ${m.receiptType ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e">Received</td><td>${esc(m.count + ' ' + m.receiptType)}</td></tr>` : ''}
+    </table>
+    ${palletList ? `
+      <p style="margin:16px 0 6px 0;font-weight:600">Pallets</p>
+      <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px;width:100%">
+        <tr style="color:#75767e;background:#f8f8f9">
+          <td style="padding:6px 12px 6px 8px">#</td>
+          <td style="padding:6px 12px 6px 0">Location</td>
+          <td style="padding:6px 12px 6px 0">Dims</td>
+          <td style="padding:6px 0">Weight</td>
+        </tr>
+        ${palletList}
+      </table>` : ''}
   `;
+  return renderEmailShell({ eyebrow, title, bodyHtml });
 }
 
-// Dedicated template for "putaway done" — what CSM gets when an order is staged.
+// Dedicated template for "putaway done" / "dims complete" — what CSM gets when an order is staged.
 function renderOrderStagedBody(event) {
   const m = event.meta || {};
   const pallets = m.pallets || [];
@@ -274,8 +331,8 @@ function renderOrderStagedBody(event) {
       ? `${dimsParts[0]}×${dimsParts[1]}×${dimsParts[2]} ${esc(p.dimensionUnit || 'in')}`
       : 'dims not recorded';
     const wt = p.weight ? `${p.weight} ${esc(p.weightUnit || 'lb')}` : 'weight not recorded';
-    const idTag = p.palletId ? ` <span style="color:#666;font-weight:400">[${esc(p.palletId)}]</span>` : '';
-    return `<li style="margin-bottom:4px"><strong>P${p.palletNo}</strong>${idTag}: ${dims} · ${wt}</li>`;
+    const idTag = p.palletId ? ` <span style="color:#75767e;font-weight:400">[${esc(p.palletId)}]</span>` : '';
+    return `<li style="margin-bottom:6px"><strong>P${p.palletNo}</strong>${idTag}: ${dims} · ${wt}</li>`;
   }).join('');
 
   // Build address rows only for fields that are populated, keep CSM-friendly labels.
@@ -293,29 +350,34 @@ function renderOrderStagedBody(event) {
   ];
   const addressRows = addressFields
     .filter(([, v]) => v)
-    .map(([k, v]) => `<tr><td style="padding:2px 14px 2px 0;color:#666;white-space:nowrap">${k}</td><td>${esc(v)}</td></tr>`)
+    .map(([k, v]) => `<tr><td style="padding:2px 14px 2px 0;color:#75767e;white-space:nowrap">${k}</td><td>${esc(v)}</td></tr>`)
     .join('');
 
-  return `
-    <div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5">
-      <p>Hi Team,</p>
-      <p>The order has <strong>${pallets.length}</strong> pallet${pallets.length === 1 ? '' : 's'} and here are dims and weight:</p>
-      <ul style="margin:8px 0 14px;padding-left:22px">${palletLines}</ul>
+  // Header eyebrow distinguishes the two events that share this body so recipients can
+  // tell them apart at a glance, even though the layout is intentionally the same.
+  const eyebrow = event.type === 'order.dims_complete' ? 'Dims + weight ready' : 'Putaway done';
+  const who = m.companyName || m.customerName
+    || [m.customerFirstName, m.customerLastName].filter(Boolean).join(' ')
+    || m.clientName || '';
+  const title = `${m.orderCode || ''}${who ? ' · ' + who : ''}`;
 
-      <p style="margin-top:16px"><strong>Shipping address</strong></p>
-      <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px;margin-top:4px">
-        ${addressRows || '<tr><td style="color:#999">(no address on the order in Logiwa)</td></tr>'}
-      </table>
+  const bodyHtml = `
+    <p style="margin:0 0 8px 0">Hi Team,</p>
+    <p style="margin:0 0 8px 0">The order has <strong>${pallets.length}</strong> pallet${pallets.length === 1 ? '' : 's'} and here are dims and weight:</p>
+    <ul style="margin:8px 0 18px 0;padding-left:22px">${palletLines}</ul>
 
-      <table cellspacing="0" cellpadding="0" style="margin-top:18px;border-collapse:collapse;font-size:13px;color:#444">
-        <tr><td style="padding:2px 14px 2px 0;color:#666">Order</td><td><strong>${esc(m.orderCode || '')}</strong></td></tr>
-        ${m.clientName ? `<tr><td style="padding:2px 14px 2px 0;color:#666">Client</td><td>${esc(m.clientName)}</td></tr>` : ''}
-        ${m.companyName ? `<tr><td style="padding:2px 14px 2px 0;color:#666">Company</td><td>${esc(m.companyName)}</td></tr>` : ''}
-      </table>
+    <p style="margin:16px 0 6px 0;font-weight:600">Shipping address</p>
+    <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:13px;margin-top:4px">
+      ${addressRows || '<tr><td style="color:#a8a9b0">(no address on the order in Logiwa)</td></tr>'}
+    </table>
 
-      <p style="margin-top:18px;color:#777;font-size:12px">eShipper+ RFS · automated notification</p>
-    </div>
+    <table cellspacing="0" cellpadding="0" style="margin-top:18px;border-collapse:collapse;font-size:13px;color:#3f4047">
+      <tr><td style="padding:2px 14px 2px 0;color:#75767e">Order</td><td><strong>${esc(m.orderCode || '')}</strong></td></tr>
+      ${m.clientName ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e">Client</td><td>${esc(m.clientName)}</td></tr>` : ''}
+      ${m.companyName ? `<tr><td style="padding:2px 14px 2px 0;color:#75767e">Company</td><td>${esc(m.companyName)}</td></tr>` : ''}
+    </table>
   `;
+  return renderEmailShell({ eyebrow, title, bodyHtml });
 }
 
 function num(v) {
