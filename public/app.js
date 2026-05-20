@@ -1345,10 +1345,11 @@ async function renderNotificationsSection(host) {
         <select id="nr-condition">
           ${NOTIFY_CONDITION_OPTIONS.map(o => `<option value="${o.v}">${escape(o.label)}</option>`).join('')}
         </select>
-        <input type="text" id="nr-recipients" placeholder="Recipients — comma-separated emails" />
+        <input type="text" id="nr-recipients" placeholder="To — comma-separated emails" />
+        <input type="text" id="nr-cc" placeholder="CC — comma-separated (optional)" />
         <button class="btn" id="nr-add">Add rule</button>
       </div>
-      <div class="hint" style="margin-top:-4px">Tip: Ctrl-click (Cmd-click on Mac) clients in the dropdown to pick multiple. Select none for "all clients".</div>
+      <div class="hint" style="margin-top:-4px">Tip: Ctrl-click (Cmd-click on Mac) clients in the dropdown to pick multiple. Select none for "all clients". CC is optional.</div>
     </div>
 
     <div class="card">
@@ -1374,13 +1375,15 @@ async function saveNotificationRule() {
   const clientNames = Array.from($('#nr-clients').selectedOptions).map(o => o.value);
   const condition = $('#nr-condition').value;
   const recipients = $('#nr-recipients').value.split(',').map(s => s.trim()).filter(Boolean);
+  const cc = $('#nr-cc').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!recipients.length) { toast('Enter at least one recipient email', 'error'); return; }
   try {
     $('#nr-add').disabled = true;
-    await api('POST', '/api/rfs/admin/notification-rules', { event, clientNames, condition, recipients, enabled: true });
+    await api('POST', '/api/rfs/admin/notification-rules', { event, clientNames, condition, recipients, cc, enabled: true });
     toast('Rule added');
     Array.from($('#nr-clients').options).forEach(o => o.selected = false);
     $('#nr-recipients').value = '';
+    $('#nr-cc').value = '';
     await loadNotificationRules();
   } catch (e) { toast(e.message, 'error'); }
   finally { $('#nr-add').disabled = false; }
@@ -1401,7 +1404,8 @@ async function loadNotificationRules() {
               <th style="padding:8px">Event</th>
               <th style="padding:8px">Clients</th>
               <th style="padding:8px">Condition</th>
-              <th style="padding:8px">Recipients</th>
+              <th style="padding:8px">To</th>
+              <th style="padding:8px">CC</th>
               <th style="padding:8px">Status</th>
               <th style="padding:8px">Actions</th>
             </tr>
@@ -1422,6 +1426,7 @@ async function loadNotificationRules() {
                   <td style="padding:8px">${clientsCell}</td>
                   <td style="padding:8px">${escape(condLabel)}</td>
                   <td style="padding:8px">${(r.recipients || []).map(e => `<div>${escape(e)}</div>`).join('')}</td>
+                  <td style="padding:8px">${(r.cc || []).length ? (r.cc).map(e => `<div>${escape(e)}</div>`).join('') : '<span class="hint">—</span>'}</td>
                   <td style="padding:8px">${r.enabled ? '<span class="badge loaded">enabled</span>' : '<span class="badge" style="background:#eee;color:#888">disabled</span>'}</td>
                   <td style="padding:8px;white-space:nowrap">
                     <button class="btn secondary" data-nr-action="edit" data-id="${escape(r.id)}" style="padding:4px 8px;min-height:0;font-size:12px">Edit</button>
@@ -1495,8 +1500,10 @@ function openNotifyRuleEditModal(rule) {
         <select id="nre-condition">
           ${NOTIFY_CONDITION_OPTIONS.map(o => `<option value="${o.v}"${rule.condition === o.v ? ' selected' : ''}>${escape(o.label)}</option>`).join('')}
         </select>
-        <label>Recipients <span class="hint" style="font-weight:400">— comma-separated emails</span></label>
+        <label>To <span class="hint" style="font-weight:400">— comma-separated emails</span></label>
         <input type="text" id="nre-recipients" value="${escape((rule.recipients || []).join(', '))}" />
+        <label>CC <span class="hint" style="font-weight:400">— comma-separated, optional</span></label>
+        <input type="text" id="nre-cc" value="${escape((rule.cc || []).join(', '))}" />
         <div class="row" style="margin-top:12px;align-items:center">
           <label class="grow" style="margin:0;display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="nre-enabled"${rule.enabled ? ' checked' : ''} /> Enabled
@@ -1517,11 +1524,12 @@ function openNotifyRuleEditModal(rule) {
     const clientNames = Array.from($('#nre-clients').selectedOptions).map(o => o.value);
     const condition = $('#nre-condition').value;
     const recipients = $('#nre-recipients').value.split(',').map(s => s.trim()).filter(Boolean);
+    const cc = $('#nre-cc').value.split(',').map(s => s.trim()).filter(Boolean);
     const enabled = $('#nre-enabled').checked;
     if (!recipients.length) { toast('At least one recipient email required', 'error'); return; }
     try {
       $('#nre-save').disabled = true;
-      await api('PUT', `/api/rfs/admin/notification-rules/${rule.id}`, { event, clientNames, condition, recipients, enabled });
+      await api('PUT', `/api/rfs/admin/notification-rules/${rule.id}`, { event, clientNames, condition, recipients, cc, enabled });
       toast('Rule updated');
       close();
       await loadNotificationRules();

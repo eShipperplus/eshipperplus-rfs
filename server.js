@@ -148,13 +148,17 @@ const _mailer = (process.env.SMTP_USER && process.env.SMTP_PASS)
   ? nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } })
   : null;
 
-async function sendEmail(to, subject, html) {
+async function sendEmail(to, subject, html, cc) {
   if (!_mailer) {
     console.warn('[email] SMTP not configured — skipping email to', to, 'subject:', subject);
     return { skipped: true };
   }
   try {
-    await _mailer.sendMail({ from: `eShipper+ RFS <${process.env.SMTP_USER}>`, to, subject, html });
+    const msg = { from: `eShipper+ RFS <${process.env.SMTP_USER}>`, to, subject, html };
+    if (cc && (Array.isArray(cc) ? cc.length : String(cc).trim())) {
+      msg.cc = Array.isArray(cc) ? cc.join(',') : cc;
+    }
+    await _mailer.sendMail(msg);
     return { sent: true };
   } catch (err) {
     console.error('[email] send failed:', err.message);
@@ -205,9 +209,10 @@ async function dispatchNotifications(event) {
 
       const recipients = (rule.recipients || []).filter(Boolean);
       if (!recipients.length) continue;
+      const cc = (rule.cc || []).filter(Boolean);
       const subject = renderEmailSubject(event);
       const html = renderEmailBody(event);
-      await sendEmail(recipients.join(','), subject, html);
+      await sendEmail(recipients.join(','), subject, html, cc);
     }
   } catch (err) {
     console.error('[notifications] dispatch failed:', err.message);
@@ -1919,18 +1924,20 @@ function normalizeClientList(body) {
 
 app.post('/api/rfs/admin/notification-rules', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const { event, recipients, condition, enabled } = req.body;
+    const { event, recipients, cc, condition, enabled } = req.body;
     if (!NOTIFY_EVENTS.includes(event)) return res.status(400).json({ error: `event must be one of: ${NOTIFY_EVENTS.join(', ')}` });
     const cond = condition || 'always';
     if (!NOTIFY_CONDITIONS.includes(cond)) return res.status(400).json({ error: `condition must be one of: ${NOTIFY_CONDITIONS.join(', ')}` });
     const recip = Array.isArray(recipients) ? recipients.map(s => String(s).trim()).filter(Boolean) : [];
     if (!recip.length) return res.status(400).json({ error: 'At least one recipient email required' });
+    const ccList = Array.isArray(cc) ? cc.map(s => String(s).trim()).filter(Boolean) : [];
     const clientNames = normalizeClientList(req.body);
     const ref = await db.collection('rfs_notification_rules').add({
       event,
       clientNames,           // new multi-client array (empty = all clients)
       clientName: clientNames.length === 1 ? clientNames[0] : null, // legacy mirror, kept for older clients
       recipients: recip,
+      cc: ccList,            // optional CC recipients
       condition: cond,
       enabled: enabled !== false,
       createdAt: Timestamp.now(),
@@ -1960,6 +1967,9 @@ app.put('/api/rfs/admin/notification-rules/:id', requireAuth, requireRole('admin
       if (!recip.length) return res.status(400).json({ error: 'At least one recipient required' });
       updates.recipients = recip;
     }
+    if (req.body.cc !== undefined) {
+      updates.cc = Array.isArray(req.body.cc) ? req.body.cc.map(s => String(s).trim()).filter(Boolean) : [];
+    }
     if (req.body.condition !== undefined) {
       if (!NOTIFY_CONDITIONS.includes(req.body.condition)) return res.status(400).json({ error: 'Bad condition' });
       updates.condition = req.body.condition;
@@ -1987,7 +1997,7 @@ app.post('/api/rfs/admin/notification-rules/:id/test', requireAuth, requireRole(
     const result = await sendEmail(rule.recipients.join(','), `[TEST] RFS notification — ${rule.event}`, `
       <p>This is a test email from the eShipper+ RFS notification rule for <strong>${rule.event}</strong>${rule.clientName ? ' · ' + rule.clientName : ''}.</p>
       <p>If you received this, your rule is wired up correctly.</p>
-    `);
+    `, (rule.cc || []).filter(Boolean));
     res.json({ ok: true, result });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
