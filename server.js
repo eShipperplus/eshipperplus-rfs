@@ -367,7 +367,9 @@ function renderOrderStagedBody(event) {
 
   // Header eyebrow distinguishes the two events that share this body so recipients can
   // tell them apart at a glance, even though the layout is intentionally the same.
-  const eyebrow = event.type === 'order.dims_complete' ? 'Dims + weight ready' : 'Putaway done';
+  // NOTE: keep this customer-safe — these emails go to external parties, so avoid
+  // internal warehouse jargon (e.g. "putaway done").
+  const eyebrow = event.type === 'order.dims_complete' ? 'Dims + weight ready' : 'Order staged';
   const who = m.companyName || m.customerName
     || [m.customerFirstName, m.customerLastName].filter(Boolean).join(' ')
     || m.clientName || '';
